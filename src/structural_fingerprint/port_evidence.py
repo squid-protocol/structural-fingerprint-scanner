@@ -78,6 +78,8 @@ class SnapshotEvidence:
     multimodal_mean_cos: float
     multimodal_coverage: float
     comment_rbh: int
+    edge_pres: float = 0.0
+    rbh_hop_mae: float = 1.0
     birth0_retained: int = 0
     new_births: int = 0
     post_t0_cmt_rbh: int = 0
@@ -365,9 +367,9 @@ def _seed_and_extend(
     ext_comment_w: float = 0.0,
     seed_frac: float = 0.15,
     hops: int = 3,
-) -> tuple[dict[int, int], float, int]:
+) -> tuple[dict[int, int], float, int, float, float]:
     if p.view.n == 0 or r.view.n == 0:
-        return {}, 0.0, 0
+        return {}, 0.0, 0, 0.0, 1.0
     m = BL._sqdist(p.x, r.x)
     m = m / (m.max() or 1.0)
     if j_mat is not None and fgw_comment_w > 0.0:
@@ -380,6 +382,13 @@ def _seed_and_extend(
     rbh.sort(key=lambda x: x[2], reverse=True)
     k_seed = max(1, int(len(rbh) * seed_frac)) if rbh else 0
     seeds = rbh[:k_seed]
+
+    if len(rbh) > 1:
+        pi_rbh = np.array([i for i, _, _ in rbh], dtype=np.int64)
+        ri_rbh = np.array([j for _, j, _ in rbh], dtype=np.int64)
+        rbh_hop_mae = float(np.mean(np.abs(p.h[np.ix_(pi_rbh, pi_rbh)] - r.h[np.ix_(ri_rbh, ri_rbh)])))
+    else:
+        rbh_hop_mae = 1.0
 
     anchor: dict[int, int] = {i: j for i, j, _ in seeds}
     used_r: set[int] = set(anchor.values())
@@ -425,10 +434,19 @@ def _seed_and_extend(
             break
 
     if not anchor:
-        return anchor, 0.0, 0
+        return anchor, 0.0, 0, 0.0, rbh_hop_mae
     cos_vals = [float(r.norm[ru] @ p_sh_norm[pu]) for pu, ru in anchor.items()]
     high_cos = sum(1 for c in cos_vals if c >= 0.95)
-    return anchor, float(np.mean(cos_vals)), high_cos
+    total_e = 0
+    pres_e = 0
+    for pu, ru in anchor.items():
+        for pv in p.nbrs.get(pu, ()):
+            if pv > pu and pv in anchor:
+                total_e += 1
+                if anchor[pv] in r.nbrs.get(ru, ()):
+                    pres_e += 1
+    edge_pres = pres_e / total_e if total_e > 0 else 0.0
+    return anchor, float(np.mean(cos_vals)), high_cos, edge_pres, rbh_hop_mae
 
 
 def _comment_rbh(j_mat: np.ndarray, p_toks: list[set[str]], r_toks: list[set[str]], min_toks: int = 3, min_j: float = 0.25) -> dict[int, int]:
@@ -490,8 +508,8 @@ def build_port_evidence(
         sides.append(side)
         j_mat = _jaccard_matrix(side.toks, origin.toks)
 
-        m_struct, cos_s, high_cos_s = _seed_and_extend(side, origin, bp)
-        m_multi, cos_m, _ = _seed_and_extend(side, origin, bp, j_mat=j_mat, fgw_comment_w=0.25, ext_comment_w=1.0)
+        m_struct, cos_s, high_cos_s, edge_pres_s, hop_mae_s = _seed_and_extend(side, origin, bp)
+        m_multi, cos_m, _, _, _ = _seed_and_extend(side, origin, bp, j_mat=j_mat, fgw_comment_w=0.25, ext_comment_w=1.0)
         m_cmt = _comment_rbh(j_mat, side.toks, origin.toks)
         struct_maps.append(m_struct)
         cmt_maps.append(m_cmt)
@@ -535,6 +553,8 @@ def build_port_evidence(
             multimodal_mean_cos=cos_m,
             multimodal_coverage=len(m_multi) / denom,
             comment_rbh=len(m_cmt),
+            edge_pres=edge_pres_s,
+            rbh_hop_mae=hop_mae_s,
             birth0_retained=retained,
             new_births=len(ledger.births(s_idx)) if s_idx > 0 else 0,
             post_t0_cmt_rbh=post_t0_cmt,
@@ -561,19 +581,25 @@ def build_port_evidence(
     for pu, ru in m_proj.items():
         m_union.setdefault(pu, ru)
 
-    # Isotonic decay curve (uses pure-structural name accuracy if scored, else structural coverage * mean_cos)
+    # Isotonic decay curve:
+    # - With score_names=True: pure-structural name accuracy
+    # - Blind (score_names=False): edge-preserving structural rate (edge_pres * struct_coverage)
     raw_rates = [
         (ev.struct_name_ok / max(1, ev.struct_matched)) if (score_names and ev.struct_name_ok is not None)
-        else (ev.struct_coverage * max(0.0, ev.struct_mean_cos))
+        else (ev.edge_pres * ev.struct_coverage)
         for ev in snap_ev
     ]
     fitted = isotonic_nonincreasing(raw_rates)
     birth_r = fitted[0]
     head_r = fitted[-1]
     drop = birth_r - head_r
-    if birth_r < 0.05 and head_r < 0.05:
+    clears_null = any(
+        (ev.rbh_hop_mae < 0.095) or (ev.edge_pres >= 0.65) or (ev.comment_rbh >= 20)
+        for ev in snap_ev
+    )
+    if (score_names and birth_r < 0.05 and head_r < 0.05) or (not score_names and not clears_null):
         verdict = "unrelated_or_clean_room"
-    elif drop >= 0.03:
+    elif drop >= 0.02:
         verdict = "one_time_port"
     else:
         verdict = "active_fork_or_mirror"
@@ -618,8 +644,8 @@ def format_evidence_card(card: PortEvidenceCard) -> str:
         m_str = f"{ev.multimodal_name_ok}/{ev.multimodal_matched}" if ev.multimodal_name_ok is not None else f"{ev.multimodal_matched}"
         c_str = f"{ev.comment_name_ok}/{ev.comment_rbh}" if ev.comment_name_ok is not None else f"{ev.comment_rbh}"
         lines.append(
-            f"  {ev.label:18s} | n={ev.n_port:4d} | struct={s_str:>8s} (hi={ev.struct_high_cos:3d}, cos={ev.struct_mean_cos:.3f}) "
-            f"| +cmt={m_str:>8s} | cmt_rbh={c_str:>7s} (post_t0={ev.post_t0_cmt_rbh:2d}) | b0_ret={ev.birth0_retained:3d}"
+            f"  {ev.label:18s} | n={ev.n_port:4d} | struct={s_str:>8s} (edge={ev.edge_pres:.3f}, hop_mae={ev.rbh_hop_mae:.3f}) "
+            f"| +cmt={m_str:>8s} | cmt_rbh={c_str:>7s} (post_t0={ev.post_t0_cmt_rbh:2d})"
         )
     if card.head_direct_ok is not None:
         lines.append(
