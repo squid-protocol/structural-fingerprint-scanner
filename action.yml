@@ -1,0 +1,94 @@
+name: "Structural Fingerprint Lattice Compare"
+description: "Run two-layer FGW Seed-and-Extend + 32-keyword-family lattice comparison between two repositories or scans."
+
+inputs:
+  repo-a:
+    description: "Path to first repository or GitGalaxy scan DB/directory"
+    required: true
+  repo-b:
+    description: "Path to second repository or GitGalaxy scan DB/directory"
+    required: true
+  lens:
+    description: "Feature reference lens ('portable' or 'structure')"
+    required: false
+    default: "portable"
+  hops:
+    description: "1-hop call-graph extension rounds"
+    required: false
+    default: "3"
+  seed-frac:
+    description: "Top reciprocal FGW fraction for Tier-1 seeds"
+    required: false
+    default: "0.15"
+  scan-cache:
+    description: "Optional directory to cache GitGalaxy scan DBs"
+    required: false
+    default: ".sfs-scan-cache"
+  python-version:
+    description: "Python version to set up"
+    required: false
+    default: "3.12"
+  install-spec:
+    description: "Package spec for structural-fingerprint-scanner (e.g. '.[scan]' or PyPI spec)"
+    required: false
+    default: "${{ github.action_path }}[scan]"
+
+outputs:
+  json:
+    description: "Full TwoLayerResult JSON payload"
+    value: ${{ steps.compare.outputs.json }}
+  fgw-cost:
+    description: "Layer 1 Fused Gromov-Wasserstein transport cost"
+    value: ${{ steps.compare.outputs.fgw_cost }}
+  se-coverage:
+    description: "Layer 1 Seed-and-Extend function coverage"
+    value: ${{ steps.compare.outputs.se_coverage }}
+  kw-jsd:
+    description: "Layer 2 32-keyword-family Jensen-Shannon distance"
+    value: ${{ steps.compare.outputs.kw_jsd }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install structural-fingerprint-scanner
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "${{ inputs.install-spec }}"
+
+    - name: Run two-layer lattice comparison
+      id: compare
+      shell: bash
+      run: |
+        RESULT_JSON=$(sfs lattice-compare "${{ inputs.repo-a }}" "${{ inputs.repo-b }}" \
+          --lens "${{ inputs.lens }}" \
+          --hops "${{ inputs.hops }}" \
+          --seed-frac "${{ inputs.seed-frac }}" \
+          --scan-cache "${{ inputs.scan-cache }}" \
+          --json)
+        echo "$RESULT_JSON"
+        {
+          echo "json<<EOF"
+          echo "$RESULT_JSON"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        RESULT_JSON="$RESULT_JSON" python - <<'PY'
+        import json, os
+        d = json.loads(os.environ["RESULT_JSON"])
+        with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+            fh.write(f"fgw_cost={d['fgw_cost']}\n")
+            fh.write(f"se_coverage={d['se_coverage']}\n")
+            fh.write(f"kw_jsd={d['kw_jsd']}\n")
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a") as fh:
+                fh.write("### Structural Fingerprint Lattice Compare\n\n")
+                fh.write(f"- **Pair:** `{d['repo_a']}` (`{d['n_a']}` funcs) vs `{d['repo_b']}` (`{d['n_b']}` funcs)\n")
+                fh.write(f"- **Layer 1 (FGW + Seed-and-Extend):** `fgw_cost={d['fgw_cost']:.3f}`, `se_n={d['se_n']}` (`{d['se_coverage']:.1%}`)\n")
+                fh.write(f"- **Layer 2 (32-Keyword Lattice):** `kw_jsd={d['kw_jsd']:.3f}`, `matched_kw_cos={d['matched_kw_cos']:.3f}`, `arch_agree={d['matched_arch_agree']:.1%}`\n")
+        PY
