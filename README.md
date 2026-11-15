@@ -82,6 +82,28 @@ sfs explain fingerprints/A.sfp.json fingerprints/B.sfp.json
 sfs spec [--lens portable] [--json]
 ```
 
+### 4. Function Ledger (library: `structural_fingerprint.ledger`)
+
+A persistent ID for every function across snapshots of one repository, so renames and moves are not counted as a
+death plus a birth. Structure proposes a link; body text or comments verify it; each link records the stage that
+made it. On four repositories, path-and-name identity overcounted deaths by 40–78%; lineage identity recovers
+70–96% of unambiguous renames and 97–100% of moves (discovery measurements, not a registered result).
+
+```python
+from pathlib import Path
+from structural_fingerprint.ledger import Snapshot, build_ledger, classify_unlinked
+
+snaps = [Snapshot(Path("scans/q1.db"), "<commit sha>", "2024Q1"), ...]   # oldest first, one scan per commit
+led = build_ledger(Path("path/to/git/checkout"), snaps)                    # reads git objects only
+led.ids[s]            # lineage id of every function in snapshot s
+led.links[s]          # old index -> Link(new, stage, score, ambiguous, body, doc)
+led.span()            # lineage id -> (first, last) snapshot
+dead, born = classify_unlinked(led, s)   # cause of each unlinked death/birth (split, merged, file_removed, ...)
+```
+
+Needs `start_line` and `docstring` in the scan database for text verification; without them only the certain
+stages (identity, same name in the git-mapped file) link.
+
 ---
 
 ## Empirical Evidence
