@@ -7,9 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from structural_fingerprint.cli import main as cli_main
 from structural_fingerprint.ledger import Snapshot
 from structural_fingerprint.port_evidence import (
     build_port_evidence,
+    card_to_dict,
     format_evidence_card,
     isotonic_nonincreasing,
     same_name,
@@ -133,3 +135,19 @@ def test_build_port_evidence_end_to_end(tmp_path: Path):
     text = format_evidence_card(card)
     assert "PORT EVIDENCE CARD: port <- origin" in text
     assert "Isotonic Decay:" in text
+
+    d = card_to_dict(card)
+    assert d["port_label"] == "port"
+    assert len(d["snapshots"]) == 2
+
+    # Landmark path (max_fgw_nodes=10 < 18) and CLI --json path
+    rc = cli_main([
+        "port-evidence",
+        "--origin-scan", str(origin_db),
+        "--port-repo", str(repo),
+        "--snapshot", f"{db0}@{sha0}@t0",
+        "--snapshot", f"{db1}@{sha1}@t1",
+        "--max-fgw-nodes", "10",
+        "--json",
+    ])
+    assert rc == 0

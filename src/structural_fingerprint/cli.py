@@ -386,6 +386,38 @@ def cmd_spec(a: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_snapshot_arg(spec: str):
+    from .ledger import Snapshot
+    parts = spec.split("@", 2)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ScanError(f"invalid --snapshot '{spec}'; expected SCAN_PATH@COMMIT[@LABEL]")
+    scan_p = resolve_scans([parts[0]])[0]
+    label = parts[2] if len(parts) == 3 else parts[1][:7]
+    return Snapshot(scan=scan_p, commit=parts[1], label=label)
+
+
+def cmd_port_evidence(a: argparse.Namespace) -> int:
+    from .port_evidence import build_port_evidence, card_to_dict, format_evidence_card
+    origin_db = resolve_scans([a.origin_scan])[0]
+    snaps = [_parse_snapshot_arg(s) for s in a.snapshot]
+    card = build_port_evidence(
+        origin_db,
+        Path(a.port_repo),
+        snaps,
+        origin_repo=Path(a.origin_repo) if a.origin_repo else None,
+        origin_label=a.origin_label,
+        port_label=a.port_label,
+        min_loc=a.min_loc,
+        max_fgw_nodes=a.max_fgw_nodes,
+        score_names=a.score_names,
+    )
+    if a.json:
+        print(json.dumps(card_to_dict(card), indent=2))
+    else:
+        print(format_evidence_card(card))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="sfs", description="Structural fingerprints of codebases from GitGalaxy scans.")
     ap.add_argument("--version", action="version", version=f"structural-fingerprint-scanner {__version__}")
@@ -519,6 +551,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--lens", choices=LENSES, default="structure")
     p.set_defaults(func=cmd_spec)
+
+    p = sub.add_parser("port-evidence", help="multi-snapshot Port Evidence Card (structure + comments + ledger + isotonic decay)")
+    p.add_argument("--origin-scan", required=True, help="origin scan DB or directory")
+    p.add_argument("--port-repo", required=True, help="target git repository path")
+    p.add_argument("--snapshot", action="append", required=True, help="target snapshot as SCAN_PATH@COMMIT[@LABEL] (oldest first)")
+    p.add_argument("--origin-repo", help="optional origin repository path for comment extraction")
+    p.add_argument("--origin-label", default="origin")
+    p.add_argument("--port-label")
+    p.add_argument("--max-fgw-nodes", type=int, default=2500, help="landmark cap for FGW on large repos")
+    p.add_argument("--score-names", action="store_true", help="enable post-hoc name-agreement scoring")
+    p.add_argument("--json", action="store_true")
+    common(p)
+    p.set_defaults(func=cmd_port_evidence)
 
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING - 10 * min(a.verbose, 2), format="%(levelname)s %(message)s")

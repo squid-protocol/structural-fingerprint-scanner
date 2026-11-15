@@ -21,7 +21,7 @@ import sqlite3
 import subprocess
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +80,8 @@ class SnapshotEvidence:
     comment_rbh: int
     edge_pres: float = 0.0
     rbh_hop_mae: float = 1.0
+    null_hop_mae: float = 1.0
+    hop_z: float = 0.0
     birth0_retained: int = 0
     new_births: int = 0
     post_t0_cmt_rbh: int = 0
@@ -321,11 +323,34 @@ class _PreparedSide:
     ft: FunctionTable
     view: BL.BlindView
     x: np.ndarray
-    h: np.ndarray
+    h: np.ndarray | None
     comp: np.ndarray
     norm: np.ndarray
     nbrs: dict[int, set[int]]
     toks: list[set[str]]
+
+
+def _sub_hop_matrix(v: BL.BlindView, idx: np.ndarray, cap: int) -> np.ndarray:
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import shortest_path
+
+    k = len(idx)
+    if k == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    remap = np.full(v.n, -1, dtype=np.int64)
+    remap[idx] = np.arange(k, dtype=np.int64)
+    edges = v.edges
+    if len(edges):
+        u = remap[edges[:, 0]]
+        w = remap[edges[:, 1]]
+        mask = (u >= 0) & (w >= 0)
+        u, w = u[mask], w[mask]
+        a = csr_matrix((np.ones(len(u), dtype=np.float64), (u, w)), shape=(k, k))
+    else:
+        a = csr_matrix((k, k), dtype=np.float64)
+    d = shortest_path(((a + a.T) > 0).astype(np.float64), directed=False, unweighted=True)
+    d = np.minimum(np.where(np.isfinite(d), d, cap + 1), cap + 1)
+    return (d / (cap + 1)).astype(np.float64)
 
 
 def _prepare_side(
@@ -336,13 +361,14 @@ def _prepare_side(
     min_loc: int,
     repo: Path | None,
     commit: str | None,
+    max_fgw_nodes: int = 2500,
 ) -> _PreparedSide:
     scan: ScanData = load_scan(scan_path, ref.signal_columns)
     ft = build(scan, ref, min_loc=min_loc, keyword_mode="composition").functions
     assert ft is not None
     view = BL.blind_view(ft)
     x = BL.descriptors(view, len(ref.archetype_names), bp.use_graph, bp.use_measures, None, bp.geometry_only)
-    h = BL.hop_matrix(view, bp.hop_cap)
+    h = BL.hop_matrix(view, bp.hop_cap) if view.n <= max_fgw_nodes else None
     comp_all = F.raw_features(
         ref, scan.loc, scan.complexity, scan.args, scan.keyword_density, scan.signals,
         keyword_mode="composition",
@@ -367,34 +393,74 @@ def _seed_and_extend(
     ext_comment_w: float = 0.0,
     seed_frac: float = 0.15,
     hops: int = 3,
-) -> tuple[dict[int, int], float, int, float, float]:
+    max_fgw_nodes: int = 2500,
+) -> tuple[dict[int, int], float, int, float, float, float, float]:
     if p.view.n == 0 or r.view.n == 0:
-        return {}, 0.0, 0, 0.0, 1.0
-    m = BL._sqdist(p.x, r.x)
+        return {}, 0.0, 0, 0.0, 1.0, 1.0, 0.0
+
+    if p.view.n <= max_fgw_nodes:
+        idx_p = np.arange(p.view.n, dtype=np.int64)
+        hp = p.h if p.h is not None else BL.hop_matrix(p.view, bp.hop_cap)
+    else:
+        d_all = BL._sqdist(p.x, r.x)
+        best_d = d_all.min(axis=1)
+        if j_mat is not None and fgw_comment_w > 0.0:
+            best_d = best_d - fgw_comment_w * (best_d.max() or 1.0) * j_mat.max(axis=1)
+        idx_p = np.sort(np.argsort(best_d)[:max_fgw_nodes])
+        hp = _sub_hop_matrix(p.view, idx_p, bp.hop_cap)
+
+    if r.view.n <= max_fgw_nodes:
+        idx_r = np.arange(r.view.n, dtype=np.int64)
+        hr = r.h if r.h is not None else BL.hop_matrix(r.view, bp.hop_cap)
+    else:
+        d_all_r = BL._sqdist(r.x, p.x[idx_p])
+        idx_r = np.sort(np.argsort(d_all_r.min(axis=1))[:max_fgw_nodes])
+        hr = _sub_hop_matrix(r.view, idx_r, bp.hop_cap)
+
+    m = BL._sqdist(p.x[idx_p], r.x[idx_r])
     m = m / (m.max() or 1.0)
     if j_mat is not None and fgw_comment_w > 0.0:
-        m = np.maximum(0.0, m - fgw_comment_w * j_mat)
-    t = BL.fused_gw(m, p.h, r.h, bp.alpha, bp.epsilon, bp.outer)
+        m = np.maximum(0.0, m - fgw_comment_w * j_mat[idx_p][:, idx_r])
+    t = BL.fused_gw(m, hp, hr, bp.alpha, bp.epsilon, bp.outer)
+
+    p_to_sub = {int(orig): sub for sub, orig in enumerate(idx_p)}
+    r_to_sub = {int(orig): sub for sub, orig in enumerate(idx_r)}
+    t_row_max = np.maximum(t.max(axis=1), 1e-12)
 
     best_r = np.argmax(t, axis=1)
     best_p = np.argmax(t, axis=0)
-    rbh = [(i, int(best_r[i]), float(t[i, best_r[i]])) for i in range(p.view.n) if best_p[best_r[i]] == i]
-    rbh.sort(key=lambda x: x[2], reverse=True)
-    k_seed = max(1, int(len(rbh) * seed_frac)) if rbh else 0
-    seeds = rbh[:k_seed]
+    rbh_sub = [
+        (i, int(best_r[i]), float(t[i, best_r[i]]))
+        for i in range(len(idx_p))
+        if best_p[best_r[i]] == i
+    ]
+    rbh_sub.sort(key=lambda x: x[2], reverse=True)
+    k_seed = max(1, int(len(rbh_sub) * seed_frac)) if rbh_sub else 0
+    seeds = [(int(idx_p[i]), int(idx_r[j])) for i, j, _ in rbh_sub[:k_seed]]
 
-    if len(rbh) > 1:
-        pi_rbh = np.array([i for i, _, _ in rbh], dtype=np.int64)
-        ri_rbh = np.array([j for _, j, _ in rbh], dtype=np.int64)
-        rbh_hop_mae = float(np.mean(np.abs(p.h[np.ix_(pi_rbh, pi_rbh)] - r.h[np.ix_(ri_rbh, ri_rbh)])))
+    if len(rbh_sub) > 1:
+        pi_rbh = np.array([i for i, _, _ in rbh_sub], dtype=np.int64)
+        ri_rbh = np.array([j for _, j, _ in rbh_sub], dtype=np.int64)
+        hp_sub = hp[np.ix_(pi_rbh, pi_rbh)]
+        hr_sub = hr[np.ix_(ri_rbh, ri_rbh)]
+        rbh_hop_mae = float(np.mean(np.abs(hp_sub - hr_sub)))
+        rng = np.random.default_rng(0)
+        null_maes = []
+        for _ in range(10):
+            perm = rng.permutation(len(ri_rbh))
+            null_maes.append(float(np.mean(np.abs(hp_sub - hr_sub[np.ix_(perm, perm)]))))
+        null_hop_mae = float(np.mean(null_maes))
+        hop_z = (null_hop_mae - rbh_hop_mae) / max(float(np.std(null_maes)), 1e-4)
     else:
         rbh_hop_mae = 1.0
+        null_hop_mae = 1.0
+        hop_z = 0.0
 
-    anchor: dict[int, int] = {i: j for i, j, _ in seeds}
+    anchor: dict[int, int] = dict(seeds)
     used_r: set[int] = set(anchor.values())
     if seeds:
-        pi_s = np.array([i for i, _, _ in seeds], dtype=np.int64)
-        ri_s = np.array([j for _, j, _ in seeds], dtype=np.int64)
+        pi_s = np.array([i for i, _ in seeds], dtype=np.int64)
+        ri_s = np.array([j for _, j in seeds], dtype=np.int64)
         delta = np.mean(p.comp[pi_s] - r.comp[ri_s], axis=0)
     else:
         delta = np.zeros(p.comp.shape[1])
@@ -418,7 +484,15 @@ def _seed_and_extend(
             votes = np.array([cand_votes[c] for c in cands], dtype=np.float64)
             cos = r.norm[cands] @ p_sh_norm[pu]
             j_vec = j_mat[pu, cands] if (j_mat is not None and ext_comment_w > 0.0) else 0.0
-            scores = votes * (1.0 + np.maximum(cos, 0.0) + ext_comment_w * j_vec) + 0.25 * t[pu, cands] / (t[pu].max() or 1.0)
+            if pu in p_to_sub:
+                sp = p_to_sub[pu]
+                t_bonus = np.array(
+                    [t[sp, r_to_sub[int(c)]] / t_row_max[sp] if int(c) in r_to_sub else 0.0 for c in cands],
+                    dtype=np.float64,
+                )
+            else:
+                t_bonus = 0.0
+            scores = votes * (1.0 + np.maximum(cos, 0.0) + ext_comment_w * j_vec) + 0.25 * t_bonus
             best_idx = int(np.argmax(scores))
             proposals.append((float(scores[best_idx]), pu, int(cands[best_idx])))
         if not proposals:
@@ -434,7 +508,7 @@ def _seed_and_extend(
             break
 
     if not anchor:
-        return anchor, 0.0, 0, 0.0, rbh_hop_mae
+        return anchor, 0.0, 0, 0.0, rbh_hop_mae, null_hop_mae, hop_z
     cos_vals = [float(r.norm[ru] @ p_sh_norm[pu]) for pu, ru in anchor.items()]
     high_cos = sum(1 for c in cos_vals if c >= 0.95)
     total_e = 0
@@ -446,7 +520,7 @@ def _seed_and_extend(
                 if anchor[pv] in r.nbrs.get(ru, ()):
                     pres_e += 1
     edge_pres = pres_e / total_e if total_e > 0 else 0.0
-    return anchor, float(np.mean(cos_vals)), high_cos, edge_pres, rbh_hop_mae
+    return anchor, float(np.mean(cos_vals)), high_cos, edge_pres, rbh_hop_mae, null_hop_mae, hop_z
 
 
 def _comment_rbh(j_mat: np.ndarray, p_toks: list[set[str]], r_toks: list[set[str]], min_toks: int = 3, min_j: float = 0.25) -> dict[int, int]:
@@ -483,6 +557,7 @@ def build_port_evidence(
     port_label: str | None = None,
     ref: Reference | None = None,
     min_loc: int = 3,
+    max_fgw_nodes: int = 2500,
     score_names: bool = False,
 ) -> PortEvidenceCard:
     """Build a multi-snapshot Port Evidence Card for ``port_repo`` vs. ``origin_scan``."""
@@ -492,7 +567,7 @@ def build_port_evidence(
     bp = BL.BlindParams()
     keep_cols = [i for i, n in enumerate(ref.feature_names) if n not in _DROP_COMPLEXITY]
 
-    origin = _prepare_side(origin_scan, ref, bp, keep_cols, min_loc, origin_repo, None)
+    origin = _prepare_side(origin_scan, ref, bp, keep_cols, min_loc, origin_repo, None, max_fgw_nodes=max_fgw_nodes)
     ledger: Ledger = build_ledger(port_repo, snapshots, ref=ref, min_loc=min_loc)
 
     snap_ev: list[SnapshotEvidence] = []
@@ -504,12 +579,16 @@ def build_port_evidence(
 
     for s_idx, snap in enumerate(snapshots):
         lbl = snap.label or snap.commit[:7]
-        side = _prepare_side(snap.scan, ref, bp, keep_cols, min_loc, port_repo, snap.commit)
+        side = _prepare_side(snap.scan, ref, bp, keep_cols, min_loc, port_repo, snap.commit, max_fgw_nodes=max_fgw_nodes)
         sides.append(side)
         j_mat = _jaccard_matrix(side.toks, origin.toks)
 
-        m_struct, cos_s, high_cos_s, edge_pres_s, hop_mae_s = _seed_and_extend(side, origin, bp)
-        m_multi, cos_m, _, _, _ = _seed_and_extend(side, origin, bp, j_mat=j_mat, fgw_comment_w=0.25, ext_comment_w=1.0)
+        m_struct, cos_s, high_cos_s, edge_pres_s, hop_mae_s, null_hop_s, hop_z_s = _seed_and_extend(
+            side, origin, bp, max_fgw_nodes=max_fgw_nodes,
+        )
+        m_multi, cos_m, _, _, _, _, _ = _seed_and_extend(
+            side, origin, bp, j_mat=j_mat, fgw_comment_w=0.25, ext_comment_w=1.0, max_fgw_nodes=max_fgw_nodes,
+        )
         m_cmt = _comment_rbh(j_mat, side.toks, origin.toks)
         struct_maps.append(m_struct)
         cmt_maps.append(m_cmt)
@@ -555,6 +634,8 @@ def build_port_evidence(
             comment_rbh=len(m_cmt),
             edge_pres=edge_pres_s,
             rbh_hop_mae=hop_mae_s,
+            null_hop_mae=null_hop_s,
+            hop_z=hop_z_s,
             birth0_retained=retained,
             new_births=len(ledger.births(s_idx)) if s_idx > 0 else 0,
             post_t0_cmt_rbh=post_t0_cmt,
@@ -594,7 +675,9 @@ def build_port_evidence(
     head_r = fitted[-1]
     drop = birth_r - head_r
     clears_null = any(
-        (ev.rbh_hop_mae < 0.095) or (ev.edge_pres >= 0.65) or (ev.comment_rbh >= 20)
+        (ev.rbh_hop_mae < 0.095)
+        or (ev.edge_pres >= 0.65)
+        or (ev.comment_rbh >= max(10, int(0.03 * min(ev.n_port, ev.n_origin))))
         for ev in snap_ev
     )
     if (score_names and birth_r < 0.05 and head_r < 0.05) or (not score_names and not clears_null):
@@ -644,7 +727,7 @@ def format_evidence_card(card: PortEvidenceCard) -> str:
         m_str = f"{ev.multimodal_name_ok}/{ev.multimodal_matched}" if ev.multimodal_name_ok is not None else f"{ev.multimodal_matched}"
         c_str = f"{ev.comment_name_ok}/{ev.comment_rbh}" if ev.comment_name_ok is not None else f"{ev.comment_rbh}"
         lines.append(
-            f"  {ev.label:18s} | n={ev.n_port:4d} | struct={s_str:>8s} (edge={ev.edge_pres:.3f}, hop_mae={ev.rbh_hop_mae:.3f}) "
+            f"  {ev.label:18s} | n={ev.n_port:4d} | struct={s_str:>8s} (edge={ev.edge_pres:.3f}, hop_z={ev.hop_z:+.1f}) "
             f"| +cmt={m_str:>8s} | cmt_rbh={c_str:>7s} (post_t0={ev.post_t0_cmt_rbh:2d})"
         )
     if card.head_direct_ok is not None:
@@ -665,3 +748,8 @@ def format_evidence_card(card: PortEvidenceCard) -> str:
         f"Isotonic Decay: raw=[{raw_s}] | fitted=[{fit_s}] | drop={card.decay.decay_drop:+.3f} | verdict={card.decay.verdict}"
     )
     return "\n".join(lines)
+
+
+def card_to_dict(card: PortEvidenceCard) -> dict:
+    """Serialize a :class:`PortEvidenceCard` to a JSON-friendly dictionary."""
+    return asdict(card)
