@@ -187,10 +187,14 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
     n_arch = len(ref.archetype_names)
     xd = BL.descriptors(bv, n_arch, bp.use_graph, bp.use_measures, None, bp.geometry_only)
     hm = BL.hop_matrix(bv, bp.hop_cap)
+    keep_cols = [
+        i for i, n in enumerate(ref.feature_names)
+        if n not in ("log_complexity", "func_internal_density")
+    ]
     comp_all = F.raw_features(
         ref, sc.loc, sc.complexity, sc.args, sc.keyword_density, sc.signals,
         keyword_mode="composition",
-    )
+    )[:, keep_cols]
     comp = comp_all[bv.rows]
     cnorm = comp / np.maximum(np.linalg.norm(comp, axis=1, keepdims=True), 1e-9)
     nbrs: dict[int, set[int]] = defaultdict(set)
