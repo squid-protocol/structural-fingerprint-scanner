@@ -9,6 +9,9 @@
 
 It also provides **cohort fingerprinting**, **target–decoy structural twins**, **descent & profile trees**, **subsystem subway maps**, **git-history drift timelines**, and **scan-quality verification** (`ctags` / `tree-sitter` + LLM triage + PII-stripped GitGalaxy Epic issue reporting).
 
+> **Featured Case Study — [DOOM's DNA: What Survives Translation, Porting, and Rewriting](https://squid-protocol.github.io/gitgalaxy/museum-of-code/teardown-of-doom/):**
+> Validated blind across **44+ DOOM ports** (~20 languages), **9 controls**, and **5 held-out repos**. Explore the **[Interactive 16-Track DNA Gene Map](https://squid-protocol.github.io/gitgalaxy/museum-of-code/doom-dna/dna-tracks-mockup.html)** or the **[Interactive Function & Tree Explorer](https://squid-protocol.github.io/gitgalaxy/museum-of-code/doom-dna/)** on GitHub Pages.
+
 ---
 
 ## Install
@@ -111,14 +114,19 @@ stages (identity, same name in the git-mapped file) link.
 The two-layer pipeline has been validated across three benchmark programs (all blind to identifiers and file paths):
 
 ### 1. `doom-dna` — Lineage, Cross-Language Ports & Horizontal Borrowing
-*Source study: [`squid-protocol/doom-dna`](https://github.com/squid-protocol/doom-dna)*
+*Article: [DOOM's DNA (Text Edition)](https://squid-protocol.github.io/gitgalaxy/museum-of-code/teardown-of-doom/) · Interactive: [16-Track DNA Gene Map](https://squid-protocol.github.io/gitgalaxy/museum-of-code/doom-dna/dna-tracks-mockup.html) · [Function & Tree Explorer](https://squid-protocol.github.io/gitgalaxy/museum-of-code/doom-dna/) · Study repo: [`squid-protocol/doom-dna`](https://github.com/squid-protocol/doom-dna)*
 
-- **Clean port vs. scratch/unrelated separation (41 ports + controls):**
-  - Unrelated C (`lua` `0.0%`, `quake`/`quake2` `0.6%`) and from-scratch reimplementations (`room4doom`, `rust-doom`, `helion` all `0.0%`) sit at the noise floor.
-  - Layout-stripped ports are recovered 1-to-1: single-header `puredoom` (`89.0%`, `590` functions) and flat-directory Go port `gore` (`75.9%`, `426` functions).
-- **Horizontal gene transfer:** Unsupervised Seed-and-Extend recovers Chocolate Doom's `textscreen` UI library inside both `eternity` (`76.1%` of Tier-1 hits) and `odamex` (`84.0%`), and directly between `eternity ↔ odamex` (`190` Tier-1 hits) across distinct DOOM branches.
-- **Architectural clustering vs. syntax:** Three COBOL raycasters cluster at `FGW 0.670–0.706` vs. enterprise business COBOL (`carddemo-cobol-ctrl`) at `0.748–0.772`.
-- **Preregistered `DOOM-E5` held-out predictions:** Confirmed `cydoomgeneric` (`FGW=0.313`, `100.0%` Tier-1 vs. `doomgeneric`), `DOOM-style-Game` (`0.0%`), and `doome` (`0.0%`); falsifications on `iron-doom` (`0.0%`) and `doomarkable` (`0.0%`) pinpointed the paradigm boundary (below).
+[![16-Track Call-Graph DNA Gene Map for doom-wasm and gore](docs/doom-dna-tracks.png)](https://squid-protocol.github.io/gitgalaxy/museum-of-code/doom-dna/dna-tracks-mockup.html)
+
+*Click the preview above to open the **[Interactive 16-Track DNA Gene Map](https://squid-protocol.github.io/gitgalaxy/museum-of-code/doom-dna/dna-tracks-mockup.html)** across all 49 measured targets (`C01`–`C16` call-graph communities discovered directly from `linuxdoom`, zero filename rules). Above: `doom-wasm` exposes multi-donor horizontal borrowing (`42.4%` `linuxdoom` core in red, `12.3%` `chocolate-doom` in blue, `2.0%` `doomgeneric` in purple, `1.7%` `woof` in cyan), while `gore` recovers `47.1%` of Go LOC (`75.9%` 1-to-1 functions) from C without reading a single identifier.*
+
+- **Within-language structural twins (`sfs twins`):** Achieves **93% precision** (65% recall) across `27,778` function-by-port pairs against source-text diffs (Spearman `ρ = 0.83–0.84`), while unrelated C controls (`lua`, `quake`, `quake2`) sit at `0.0%–0.6%`.
+- **Clean port vs. scratch/unrelated separation (44+ ports, 9 controls, 66 cross-pairs):**
+  - Unrelated controls (`lua` `0.0%`, `quake`/`quake2` `0.6%`, Go `goom3d`/`bubbletea`, Rust `macroquad`, C raycasters, business COBOL `carddemo-cobol-ctrl`) and from-scratch reimplementations (`room4doom`, `rust-doom`, `helion` all `0.0%`) sit at the noise floor, with **0–1 accidental name hits** across **66 cross-pair permutations**.
+  - Layout-stripped and translated ports are recovered 1-to-1 by unsupervised Seed-and-Extend (`composition` mode + FGW + `delta` offset + 3-hop extension): `mood` (`95.3%`, `687/721`), single-header `puredoom` (`89.0%`, `590/663`), `doomgeneric` (`84.9%`, `547/644`), flat-directory Go port `gore` (`75.9%`, `426/561`, despite `0.2%` filename-taxonomy match), and `chocolate-doom` (`65.0%`, `433/666`).
+- **Horizontal gene transfer:** Subtracting `linuxdoom` isolates Chocolate Doom's `textscreen` UI library inside `odamex` (`178/212` = `84.0%` Tier-1), `eternity` (`210/276` = `76.1%` Tier-1), `doom-wasm` (`220/271` = `81.2%` Tier-1), and directly between `eternity ↔ odamex` (`190/228` = `83.3%` Tier-1) across distinct DOOM branches.
+- **Architectural clustering vs. syntax:** Three COBOL raycasters cluster at `FGW 0.670–0.706` vs. same-size enterprise business COBOL (`carddemo-cobol-ctrl`) at `0.748–0.775`.
+- **Preregistered `DOOM-E5` held-out predictions:** Confirmed `cydoomgeneric` (`FGW=0.313`, `100.0%` = `156/156` Tier-1 vs. `doomgeneric`), `DOOM-style-Game` (`0.0%`), and `doome` (`0.0%`); falsifications on `iron-doom` (`0.0%`, `0/147`) and `doomarkable` (`0.0%`) pinpointed the paradigm boundary (below).
 
 ### 2. `agent-habits` — Model Fingerprinting & Language-Centered Style
 - **Same-model runs resemble source forks (56 `confirm` runs):** Independent Sonnet runs (`FGW = 0.154–0.489`, `78.7%` Tier-1 / `68.1%` SE) match or exceed true C DOOM ports even with zero shared codebase ancestry.
@@ -153,6 +161,17 @@ Controlled ablations against `linuxdoom` (`doomgeneric`, `gore`, `rust-doom`) sh
 | **Missing keyword signals** | **Resilient** (`98.7%` C / `91.5%` Go T1 even with `90%` signal columns zeroed) | **Sensitive** (`doomgeneric` `kw_JSD` jumps `0.104 → 0.392` at `25%` loss and `0.748` at `50%` loss) |
 
 This asymmetry is why `sfs quality --verify` gates on **both** parser function recall (`ctags` / `tree-sitter`, protecting Layer 1) **and** zero-signal rate (protecting Layer 2).
+
+---
+
+## Perspectives: How Different Reviewers Read This Evidence
+
+| Reviewer Lens | What Stands Out | Caveat / Boundary Noted |
+|---|---|---|
+| **Clean-Room & IP Forensics** | `93%` twin precision on stripped code (`puredoom` `89.0%`, `gore` `75.9%`) and exact isolation of horizontally vendored modules (`textscreen` in `eternity`/`odamex`/`doom-wasm`) while keeping `0–1` false hits across `66` non-DOOM cross-pairs and `9` controls. | Structural homology flags *candidate* ancestry; as `agent-habits` proves (`0.154–0.489` FGW across independent Sonnet runs), shared model/idiom habits can mimic fork-level topology without copying. |
+| **Compiler & Static Analysis** | True two-layer orthogonality: ablating `50%` of functions/edges drops Layer 1 below `50%` on Go while Layer 2 `kw_JSD` stays flat (`0.101–0.109` up to `90%` drop); zeroing keyword signals breaks Layer 2 (`0.104 → 0.748`) while Layer 1 holds (`98.7%` C / `91.5%` Go). | Tiny-function OOP splitting (`34%` of `mochadoom` and `43%` of `kocoa-doom` `<= 3` LOC) distorts unsmoothed `hits/loc`, requiring `composition` mode and `sfs quality --verify`. |
+| **Legacy Modernization & Architecture** | Imperative cross-language translations (`C → Go` `gore`, `+0.50` cross-subsystem wiring) preserve call-graph DNA, and COBOL raycasters separate cleanly from business COBOL (`FGW 0.670–0.706` vs. `0.748–0.775`). | Paradigm shifts (`C → Bevy ECS` in `iron-doom`, `0.0%`) and thin external-crate wrappers (`doomarkable`, `0.0%`) erase the call-graph signature even when ported from a known ancestor. |
+| **Empirical Methodology / Skeptic** | Preregistered held-out predictions (`DOOM-E5`), explicit negative controls (`9` controls + `66` cross-pairs), and documented non-separators (raw graph-shape distance `0.30–3.25` vs. `1.04–2.30` fails without nulls). | Uncentered `kw_JSD` confounds task domain with author style unless offset by `delta_lang`, and blind wiring must be evaluated by placement agreement rather than imposed post-hoc. |
 
 ---
 
