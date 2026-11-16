@@ -44,6 +44,7 @@ _STOP = frozenset({
 })
 _WORD_RE = re.compile(r"[a-z]{3,}")
 _HASH_EXTS = (".py", ".rb", ".sh", ".pl", ".r", ".jl", ".ex", ".exs")
+_COBOL_EXTS = (".cbl", ".cob", ".cpy")
 _DROP_COMPLEXITY = ("log_complexity", "func_internal_density")
 
 
@@ -200,7 +201,9 @@ def suggest_checkpoints(repo: Path, max_snapshots: int = 5) -> list[tuple[str, s
     return [(commits[i][0], f"{commits[i][1]} ({commits[i][0]})") for i in sorted(chosen_idx)]
 
 
-def _is_comment_line(line: str, is_hash: bool) -> bool:
+def _is_comment_line(line: str, is_hash: bool, is_cobol: bool = False) -> bool:
+    if is_cobol:
+        return (len(line) >= 7 and line[6] in ("*", "/")) or line.lstrip().startswith("*>")
     s = line.lstrip()
     if is_hash:
         return s.startswith("#")
@@ -263,19 +266,21 @@ def extract_function_comments(
             n_lines = len(lines)
             sl_c = max(1, min(sl, n_lines))
             is_hash = k[0].lower().endswith(_HASH_EXTS)
+            is_cobol = k[0].lower().endswith(_COBOL_EXTS)
             lead: list[str] = []
             li = sl_c - 2
             steps = 0
             while 0 <= li < n_lines and steps < 15:
-                s = lines[li].strip()
+                raw_ln = lines[li]
+                s = raw_ln.strip()
                 if not s:
                     if lead:
                         break
                     li -= 1
                     steps += 1
                     continue
-                if _is_comment_line(s, is_hash):
-                    lead.append(s)
+                if _is_comment_line(raw_ln if is_cobol else s, is_hash, is_cobol=is_cobol):
+                    lead.append(raw_ln[7:].strip() if (is_cobol and len(raw_ln) > 7 and raw_ln[6] in ("*", "/")) else s)
                     li -= 1
                     steps += 1
                 else:
@@ -285,7 +290,12 @@ def extract_function_comments(
             b_start = max(0, sl_c - 1)
             b_end = min(n_lines, b_start + max(1, loc))
             for bl in lines[b_start:b_end]:
-                if is_hash:
+                if is_cobol:
+                    if len(bl) >= 7 and bl[6] in ("*", "/"):
+                        chunks.append(bl[7:])
+                    elif "*>" in bl:
+                        chunks.append(bl[bl.index("*>"):])
+                elif is_hash:
                     if "#" in bl:
                         chunks.append(bl[bl.index("#"):])
                 elif "//" in bl:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +14,7 @@ from structural_fingerprint.ledger import Snapshot
 from structural_fingerprint.port_evidence import (
     build_port_evidence,
     card_to_dict,
+    extract_function_comments,
     format_evidence_card,
     isotonic_nonincreasing,
     same_name,
@@ -151,3 +154,32 @@ def test_build_port_evidence_end_to_end(tmp_path: Path):
         "--json",
     ])
     assert rc == 0
+
+
+def test_extract_cobol_comments(tmp_path: Path) -> None:
+    cbl = tmp_path / "PROG.cbl"
+    cbl.write_text(
+        "000100* Validate customer billing account\n"
+        "000200 1000-VALIDATE-ACCT.\n"
+        "000300/ Check expiration date\n"
+        "       *> Free format inline comment\n"
+        "           DISPLAY 'OK'.\n"
+    )
+    db = tmp_path / "cobol.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE file_data (id INTEGER PRIMARY KEY, file_path TEXT)")
+    conn.execute(
+        "CREATE TABLE function_data (id INTEGER PRIMARY KEY, file_id INTEGER, func_name TEXT, "
+        "start_line INTEGER, loc INTEGER, docstring TEXT)"
+    )
+    conn.execute("INSERT INTO file_data VALUES (1, 'PROG.cbl')")
+    conn.execute("INSERT INTO function_data VALUES (1, 1, '1000-VALIDATE-ACCT', 2, 4, '')")
+    conn.commit()
+    conn.close()
+
+    ft = SimpleNamespace(
+        name=np.array(["1000-VALIDATE-ACCT"]),
+        path=np.array(["PROG.cbl"]),
+    )
+    toks = extract_function_comments(db, ft, np.array([0]), repo=tmp_path)
+    assert {"validate", "customer", "billing", "account", "check", "expiration", "date", "free", "format", "inline", "comment"} <= toks[0]
