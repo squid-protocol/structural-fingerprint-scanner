@@ -131,3 +131,61 @@ def test_resolve_or_scan_auto_scans_source_dir_and_errors_without_gitgalaxy(coho
     scanned = scan_io.resolve_or_scan([raw_dir], cache_dir=tmp_path / "cache")
     assert len(scanned) == 1
     assert scanned[0].name == "raw_repo_galaxy_master.db"
+
+
+def test_evidence_gate_certifies_a_fork_and_nothing_unrelated(cohort):
+    ref = load_reference("portable")
+    sc_base = load_scan(cohort["base"], ref.signal_columns)
+    sc_fork = load_scan(cohort["fork"], ref.signal_columns)
+    sc_other = load_scan(cohort["other"], ref.signal_columns)
+
+    fork = seed_and_extend_with_lattice(sc_base, sc_fork, ref, outer=15, include_matches=True)
+    other = seed_and_extend_with_lattice(sc_base, sc_other, ref, outer=15, include_matches=True)
+
+    # fork rows 0..319 are copies of base rows 0..319, in order
+    ok = [m for m in fork.matches if m.sufficient]
+    assert fork.evidence is not None and fork.n_sufficient == len(ok) > 0
+    true = sum(m.row_a == m.row_b < cohort["n_shared"] for m in ok)
+    assert true / len(ok) >= 0.9
+    assert fork.evidence.est_fdr <= fork.evidence.fdr
+    assert other.matches and other.n_sufficient == 0
+    assert not any(m.sufficient for m in other.matches)
+
+
+def test_evidence_gate_off_and_deterministic(cohort):
+    ref = load_reference("portable")
+    sc_base = load_scan(cohort["base"], ref.signal_columns)
+    sc_fork = load_scan(cohort["fork"], ref.signal_columns)
+
+    off = seed_and_extend_with_lattice(sc_base, sc_fork, ref, outer=15, include_matches=True, evidence_fdr=None)
+    assert off.evidence is None and "evidence" not in off.to_dict()
+    assert not any(m.sufficient for m in off.matches)
+    one = seed_and_extend_with_lattice(sc_base, sc_fork, ref, outer=15, include_matches=True)
+    two = seed_and_extend_with_lattice(sc_base, sc_fork, ref, outer=15, include_matches=True)
+    assert [m.sufficient for m in one.matches] == [m.sufficient for m in two.matches]
+
+
+def test_matched_rows_are_scan_rows_when_short_functions_are_dropped(tmp_path):
+    """Functions under min_loc are dropped before matching; the features, keyword profiles and
+    reported rows must still refer to the right scan rows (they were shifted onto the wrong ones)."""
+    from .conftest import random_functions, write_scan
+
+    ref = load_reference("portable")
+    rng = np.random.default_rng(11)
+    code = random_functions(120, rng, "fn")
+    short = [{**f, "name": f"tiny_{i}", "loc": 1, "complexity": 1} for i, f in enumerate(random_functions(40, rng, "t"))]
+    mixed = []
+    for i, f in enumerate(code):
+        if i % 3 == 0:
+            mixed.append(short[i // 3])
+        mixed.append(f)
+    sc_mixed = load_scan(write_scan(tmp_path, "mixed", mixed), ref.signal_columns)
+    sc_clean = load_scan(write_scan(tmp_path, "clean", code), ref.signal_columns)
+
+    res = seed_and_extend_with_lattice(sc_mixed, sc_clean, ref, outer=15, include_matches=True)
+
+    assert res.matches
+    assert all(sc_mixed.loc[m.row_a] >= 3 for m in res.matches)
+    agree = sum(sc_mixed.func_name[m.row_a] == sc_clean.func_name[m.row_b] for m in res.matches)
+    assert agree / len(res.matches) > 0.95
+    assert res.matched_kw_cos > 0.99

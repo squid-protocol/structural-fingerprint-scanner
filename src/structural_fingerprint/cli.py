@@ -316,6 +316,7 @@ def cmd_lattice_compare(a: argparse.Namespace) -> int:
         hops=a.hops,
         seed_frac=a.seed_frac,
         include_matches=a.matches,
+        evidence_fdr=a.evidence_fdr or None,
     )
     if a.json:
         print(json.dumps(res.to_dict(), indent=2))
@@ -326,6 +327,12 @@ def cmd_lattice_compare(a: argparse.Namespace) -> int:
             f"kw_JSD={res.kw_jsd:.3f}, kw_cos={res.matched_kw_cos:.3f}, "
             f"kw_dom={res.matched_kw_dom_agree:.1%}, arch_agree={res.matched_arch_agree:.1%}"
         )
+        if res.evidence is not None:
+            g = res.evidence
+            print(
+                f"  sufficient evidence: {g.n_sufficient} of {res.se_n} pairs "
+                f"(decoy-estimated false-pass rate {g.est_fdr:.1%}, target {g.fdr:.0%})"
+            )
     return 0
 
 
@@ -520,6 +527,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed-frac", type=float, default=0.15, help="top reciprocal FGW fraction for Tier-1 seeds (default 0.15)")
     p.add_argument("--scan-cache", help="directory to store auto-generated GitGalaxy scans when given raw source repos")
     p.add_argument("--matches", action="store_true", help="include matched function pairs in JSON output")
+    p.add_argument("--evidence-fdr", type=float, default=0.02,
+                   help="certify matched pairs whose evidence beats decoys at this false-pass rate (default 0.02); "
+                        "0 skips the check")
     p.add_argument("--verify", action="store_true", help="run scan quality verification (internal + optional ctags/tree-sitter)")
     p.add_argument("--source-a", help="optional source directory for repo A (for ctags/tree-sitter verification)")
     p.add_argument("--source-b", help="optional source directory for repo B (for ctags/tree-sitter verification)")

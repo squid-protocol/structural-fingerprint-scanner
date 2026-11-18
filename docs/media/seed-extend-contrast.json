@@ -1,0 +1,69 @@
+{
+ "summary": {
+  "a": "linuxdoom",
+  "b": "rust-doom",
+  "functions_a": 777,
+  "functions_b": 582,
+  "reciprocal_best": 124,
+  "anchors": 19,
+  "matched": 123,
+  "right": 0,
+  "coverage": 0.2113,
+  "fgw_cost": 0.8339,
+  "kw_jsd": 0.3987,
+  "arch_jsd": 0.3328,
+  "matched_kw_cos": 0.5636,
+  "matched_kw_dom_agree": 0.1301,
+  "matched_arch_agree": 0.6179,
+  "post_delta_res": 0.9993,
+  "tiers": [
+   {
+    "tier": 0,
+    "n": 19,
+    "right": 0,
+    "wrong": 0,
+    "unkeyed": 19
+   },
+   {
+    "tier": 1,
+    "n": 29,
+    "right": 0,
+    "wrong": 0,
+    "unkeyed": 29
+   },
+   {
+    "tier": 2,
+    "n": 45,
+    "right": 0,
+    "wrong": 0,
+    "unkeyed": 45
+   },
+   {
+    "tier": 3,
+    "n": 30,
+    "right": 0,
+    "wrong": 0,
+    "unkeyed": 30
+   }
+  ],
+  "evidence": {
+   "fdr": 0.02,
+   "draws": 5,
+   "est_fdr": 0.2167,
+   "threshold": 0.0,
+   "decoy_passing_per_draw": 0.0,
+   "sufficient": 0,
+   "right": 0,
+   "wrong": 0,
+   "unkeyed": 0
+  },
+  "ablation": {
+   "shape_only_pairs": 42,
+   "shape_only_right": 0,
+   "fgw_reciprocal_right": 0,
+   "extend_right": 0,
+   "extend_no_offset_pairs": 158,
+   "extend_no_offset_right": 0
+  }
+ }
+}

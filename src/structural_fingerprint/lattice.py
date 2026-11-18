@@ -11,6 +11,7 @@ from scipy.spatial.distance import cdist
 from . import blind as BL
 from . import compare as C
 from . import features as F
+from . import twins as TW
 from .fingerprint import build
 from .reference import Reference, load_reference
 from .scan_io import ScanData
@@ -25,6 +26,33 @@ class MatchedPair:
     tier: int
     kw_cos: float
     delta_res: float
+    # evidence distance (lower = stronger; decoy-scaled, see ``evidence_gate``) and its verdict
+    evidence: float = float("nan")
+    sufficient: bool = False
+
+
+@dataclass(frozen=True)
+class EvidenceGate:
+    """Per-pair evidence check calibrated on decoys (target-decoy competition, as in ``twins``).
+
+    A pair's evidence distance adds its keyword-mix disagreement (1 - cosine of the 32-family mixes) and its
+    shape residual after the language offset, each divided by its median over decoy pairs, so neither scale is
+    tuned by hand. Decoy pairs keep every matched (a, b) slot but give b a decoy function: each of b's measurements
+    shuffled among b-side functions of the same engine archetype. The threshold is the largest distance at which
+    (decoy pairs passing / draws + 1) / (real pairs passing) <= ``fdr``. With fewer than 1/fdr real pairs nothing
+    can pass, by design: small or unrelated matches report no sufficient evidence rather than chance ones.
+
+    The default ``fdr`` is 2%, not ``twins``' 1%: at 1% at least 100 pairs must pass with no decoy among them, which
+    certified nothing on linuxdoom -> gore. The rate is against random functions of the same kind; it understates
+    mistakes between near-identical siblings (``G_WriteDemoTiccmd`` matched to ``g_ReadDemoTiccmd``). On that pair,
+    11% of certified pairs were not the same function by name."""
+
+    fdr: float
+    draws: int
+    threshold: float
+    est_fdr: float
+    n_sufficient: int
+    decoy_passing: float  # mean decoy pairs under the threshold, per draw
 
 
 @dataclass(frozen=True)
@@ -46,11 +74,18 @@ class TwoLayerResult:
     matched_arch_agree: float
     post_delta_res: float
     matches: tuple[MatchedPair, ...] | None = None
+    evidence: EvidenceGate | None = None
+
+    @property
+    def n_sufficient(self) -> int:
+        return self.evidence.n_sufficient if self.evidence else 0
 
     def to_dict(self) -> dict:
         d = asdict(self)
         if d["matches"] is None:
             d.pop("matches")
+        if d["evidence"] is None:
+            d.pop("evidence")
         return d
 
 
@@ -187,6 +222,8 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
     n_arch = len(ref.archetype_names)
     xd = BL.descriptors(bv, n_arch, bp.use_graph, bp.use_measures, None, bp.geometry_only)
     hm = BL.hop_matrix(bv, bp.hop_cap)
+    # bv.rows index the min_loc-filtered function table; scan arrays need scan rows.
+    scan_rows = np.flatnonzero(sc.loc >= min_loc)[bv.rows]
     keep_cols = [
         i for i, n in enumerate(ref.feature_names)
         if n not in ("log_complexity", "func_internal_density")
@@ -195,7 +232,7 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
         ref, sc.loc, sc.complexity, sc.args, sc.keyword_density, sc.signals,
         keyword_mode="composition",
     )[:, keep_cols]
-    comp = comp_all[bv.rows]
+    comp = comp_all[scan_rows]
     cnorm = comp / np.maximum(np.linalg.norm(comp, axis=1, keepdims=True), 1e-9)
     nbrs: dict[int, set[int]] = defaultdict(set)
     for u, v in bv.edges.tolist():
@@ -205,10 +242,10 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
     arch = np.asarray(ft.archetype[bv.rows], dtype=np.int64)
     arch_cnt = np.bincount(arch, minlength=n_arch).astype(np.float64)
     arch_dist = arch_cnt / max(1.0, float(arch_cnt.sum()))
-    kw_norm, kw_dom, kw_dist = keyword_lattice_profile(sc.signals, bv.rows)
+    kw_norm, kw_dom, kw_dist = keyword_lattice_profile(sc.signals, scan_rows)
     return {
         "name": sc.name,
-        "rows": bv.rows,
+        "rows": scan_rows,
         "n": len(bv.rows),
         "xd": xd,
         "hm": hm,
@@ -220,7 +257,86 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
         "kw_norm": kw_norm,
         "kw_dom": kw_dom,
         "kw_dist": kw_dist,
+        "keep_cols": keep_cols,
+        "raw": {
+            "loc": np.asarray(sc.loc)[scan_rows],
+            "complexity": np.asarray(sc.complexity)[scan_rows],
+            "args": np.asarray(sc.args)[scan_rows],
+            "keyword_density": np.asarray(sc.keyword_density)[scan_rows],
+            "signals": np.asarray(sc.signals)[scan_rows],
+        },
     }
+
+
+def _decoy_side(B: dict, ref: Reference, seed_text: str) -> tuple[np.ndarray, np.ndarray]:
+    """B's functions with every measurement shuffled among B functions of the same engine archetype
+    (``twins._decoy``'s rule): realistic functions of each kind, but each real function destroyed.
+    Returns the decoy composition features and unit keyword-family vectors."""
+    raw = B["raw"]
+    scalars = np.column_stack([raw["loc"], raw["complexity"], raw["args"], raw["keyword_density"]]).astype(np.float64)
+    table = np.column_stack([scalars, np.asarray(raw["signals"], dtype=np.float64)])
+    shuffled = TW._decoy(table, B["arch"], seed_text)
+    loc, cx, args, kd = (shuffled[:, k] for k in range(4))
+    sig = shuffled[:, 4:]
+    comp = F.raw_features(ref, loc, cx, args, kd, sig, keyword_mode="composition")[:, B["keep_cols"]]
+    kw_norm, _, _ = keyword_lattice_profile(sig)
+    return comp, kw_norm
+
+
+def _fdr_threshold_draws(target_d: np.ndarray, decoy_d: np.ndarray, draws: int, fdr: float) -> tuple[float, float]:
+    """``twins._fdr_threshold`` with ``draws`` decoy sets pooled: decoy counts are per draw."""
+    if len(target_d) == 0:
+        return 0.0, 0.0
+    ts = np.sort(target_d)
+    ds = np.sort(decoy_d)
+    n_t = np.arange(1, len(ts) + 1)
+    est = (np.searchsorted(ds, ts, side="right") / max(1, draws) + 1) / n_t
+    q = np.minimum.accumulate(est[::-1])[::-1]
+    ok = np.flatnonzero(q <= fdr)
+    if len(ok) == 0:
+        return float("-inf"), float(q[0])
+    k = ok[-1]
+    return float(ts[k]), float(est[k])
+
+
+def evidence_gate(
+    A: dict,
+    B: dict,
+    pairs: list[tuple[int, int]],
+    delta: np.ndarray,
+    ref: Reference,
+    *,
+    fdr: float = 0.02,
+    draws: int = 5,
+) -> tuple[np.ndarray, EvidenceGate]:
+    """Score every matched pair's evidence and certify the pairs closer than decoys allow (see ``EvidenceGate``)."""
+    qa = np.array([q for q, _ in pairs], dtype=np.int64)
+    rb = np.array([r for _, r in pairs], dtype=np.int64)
+
+    def parts(comp_b, kwn_b):
+        kw_gap = 1.0 - np.einsum("ij,ij->i", A["kw_norm"][qa], kwn_b[rb])
+        shape_gap = np.linalg.norm(A["comp"][qa] - (comp_b[rb] + delta), axis=1)
+        return kw_gap, shape_gap
+
+    real = parts(B["comp"], B["kw_norm"])
+    fake = [parts(*_decoy_side(B, ref, f"{A['name']}\0{B['name']}\0evidence\0{k}")) for k in range(draws)]
+    fk = np.concatenate([f[0] for f in fake])
+    fs = np.concatenate([f[1] for f in fake])
+    s_kw = float(np.median(fk)) or 1e-9
+    s_shape = float(np.median(fs)) or 1e-9
+    target = real[0] / s_kw + real[1] / s_shape
+    decoy = fk / s_kw + fs / s_shape
+    thr, est = _fdr_threshold_draws(target, decoy, draws, fdr)
+    ok = target <= thr
+    gate = EvidenceGate(
+        fdr=fdr,
+        draws=draws,
+        threshold=thr if np.isfinite(thr) else 0.0,
+        est_fdr=est,
+        n_sufficient=int(ok.sum()),
+        decoy_passing=float((decoy <= thr).sum()) / max(1, draws),
+    )
+    return target, gate
 
 
 def seed_and_extend_with_lattice(
@@ -235,8 +351,13 @@ def seed_and_extend_with_lattice(
     hops: int = 3,
     seed_frac: float = 0.15,
     include_matches: bool = False,
+    evidence_fdr: float | None = 0.02,
+    evidence_draws: int = 5,
 ) -> TwoLayerResult:
-    """Run Layer 1 (FGW Seed-and-Extend) followed by Layer 2 (32-keyword & 14-archetype lattice)."""
+    """Run Layer 1 (FGW Seed-and-Extend) followed by Layer 2 (32-keyword & 14-archetype lattice).
+
+    With ``evidence_fdr`` set, every matched pair is also checked against decoys (``evidence_gate``) and marked
+    sufficient or not; ``None`` skips the check."""
     if ref is None:
         ref = load_reference("portable")
     bp = BL.BlindParams()
@@ -317,6 +438,11 @@ def seed_and_extend_with_lattice(
     res_vals = [float(np.linalg.norm(A["comp"][qi] - b_shifted[ri])) for qi, ri in pairs]
     matched_kw_cos = float(np.median(kw_cos_vals))
     post_delta_res = float(np.median(res_vals))
+    gate = None
+    ev = np.full(len(pairs), np.nan)
+    if evidence_fdr is not None:
+        ev, gate = evidence_gate(A, B, pairs, delta, ref, fdr=evidence_fdr, draws=evidence_draws)
+    thr = gate.threshold if gate is not None and gate.n_sufficient else -np.inf
     match_records = (
         tuple(
             MatchedPair(
@@ -325,8 +451,10 @@ def seed_and_extend_with_lattice(
                 tier=tier_of[qi],
                 kw_cos=kw_c,
                 delta_res=d_res,
+                evidence=float(e),
+                sufficient=bool(e <= thr),
             )
-            for (qi, ri), kw_c, d_res in zip(pairs, kw_cos_vals, res_vals)
+            for (qi, ri), kw_c, d_res, e in zip(pairs, kw_cos_vals, res_vals, ev)
         )
         if include_matches
         else None
@@ -348,4 +476,5 @@ def seed_and_extend_with_lattice(
         matched_arch_agree=matched_arch_agree,
         post_delta_res=post_delta_res,
         matches=match_records,
+        evidence=gate,
     )

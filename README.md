@@ -7,6 +7,27 @@
 1. **Layer 1 — Macro-Topology (FGW + Seed-and-Extend):** Fused Gromov–Wasserstein (`FGW`) optimal transport over function geometry + hop-distance call graphs, followed by 3-hop call-graph extension. Recovers vertical source ports, cross-language translations, and horizontally borrowed modules.
 2. **Layer 2 — Micro-Idiomatic Texture (32-Keyword-Family Lattice + `delta_lang`):** Distributional and per-matched-pair comparison across 32 structural signal families (branching, bitwise ops, pointer/state flux, encapsulation, I/O, etc.), with additive language-translation centering (`LanguageDeltaModel`) and linear style attribution (`StyleAxis`).
 
+### How it works, shown: match, extend, fingerprint
+
+![How sfs finds a port: linuxdoom (C) against its Go port gore](docs/media/seed-extend.gif)
+
+Real scans, real output: linuxdoom (C, 777 functions) against gore, its Go port (996 functions). Names are hidden until
+the last step.
+
+1. **Read:** each function becomes a shape (size, arguments, 32 keyword families) at a place in its call graph.
+2. **Match:** FGW optimal transport pairs functions whose shape *and* call-graph position agree. 439 pairs pick each
+   other; only the strongest 15% are kept as anchors (66).
+3. **Extend:** the C → Go offset is measured on the anchors. Then, for 3 hops, a caller or callee of a matched function
+   is paired with its partner's unclaimed neighbour that is closest in shape. 66 → 276 → 482 → 598 matched (77%).
+4. **Fingerprint check (evidence quality):** extend finds partners even in unrelated code, so every pair's keyword
+   fingerprint and shape are checked against decoys. A pair passes with *sufficient evidence* or is held back.
+   gore: 121 of 598 pairs pass. rust-doom, a from-scratch rewrite: 0 of 123. Random pairing: 0 of 777 right.
+5. **Answer key:** names, never used to match, grade it. Without the check, 364 of 598 matches are the same function.
+   With it, 108 of 121 (89%) are; the zoom-out shows all 777 functions with their verdict.
+
+Details, caveats and how to regenerate: [`docs/media/README.md`](docs/media/README.md) ·
+[MP4](docs/media/seed-extend.mp4)
+
 It also provides **cohort fingerprinting**, **target–decoy structural twins**, **descent & profile trees**, **subsystem subway maps**, **git-history drift timelines**, and **scan-quality verification** (`ctags` / `tree-sitter` + LLM triage + PII-stripped GitGalaxy Epic issue reporting).
 
 > **Featured Case Study — [DOOM's DNA: What Survives Translation, Porting, and Rewriting](https://squid-protocol.github.io/gitgalaxy/museum-of-code/teardown-of-doom/):**
@@ -45,6 +66,11 @@ Compare two pre-scanned DBs or raw source repositories (with `[scan]` installed)
 sfs lattice-compare repo_a/ repo_b/ --lens portable --json
 sfs lattice-compare repo_a/ repo_b/ --lens portable --matches --verify --issue-out epic.md
 ```
+
+Every matched pair also gets an evidence verdict (`sufficient` in `--matches` output, a count in the summary). The
+threshold is calibrated on decoys at a 2% false-pass rate (`--evidence-fdr`, `0` to skip). The rate is against random
+functions of the same kind; near-identical siblings are not covered by it
+(see [`docs/media/README.md`](docs/media/README.md#caveats)).
 
 ### 2. Scan Quality Verification & GitGalaxy Triage (`sfs quality`)
 Guard against under-tuned language regexes or slicers before trusting downstream numbers:
