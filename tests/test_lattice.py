@@ -131,3 +131,29 @@ def test_resolve_or_scan_auto_scans_source_dir_and_errors_without_gitgalaxy(coho
     scanned = scan_io.resolve_or_scan([raw_dir], cache_dir=tmp_path / "cache")
     assert len(scanned) == 1
     assert scanned[0].name == "raw_repo_galaxy_master.db"
+
+
+def test_matched_rows_are_scan_rows_when_short_functions_are_dropped(tmp_path):
+    """Functions under min_loc are dropped before matching; the features, keyword profiles and
+    reported rows must still refer to the right scan rows (they were shifted onto the wrong ones)."""
+    from .conftest import random_functions, write_scan
+
+    ref = load_reference("portable")
+    rng = np.random.default_rng(11)
+    code = random_functions(120, rng, "fn")
+    short = [{**f, "name": f"tiny_{i}", "loc": 1, "complexity": 1} for i, f in enumerate(random_functions(40, rng, "t"))]
+    mixed = []
+    for i, f in enumerate(code):
+        if i % 3 == 0:
+            mixed.append(short[i // 3])
+        mixed.append(f)
+    sc_mixed = load_scan(write_scan(tmp_path, "mixed", mixed), ref.signal_columns)
+    sc_clean = load_scan(write_scan(tmp_path, "clean", code), ref.signal_columns)
+
+    res = seed_and_extend_with_lattice(sc_mixed, sc_clean, ref, outer=15, include_matches=True)
+
+    assert res.matches
+    assert all(sc_mixed.loc[m.row_a] >= 3 for m in res.matches)
+    agree = sum(sc_mixed.func_name[m.row_a] == sc_clean.func_name[m.row_b] for m in res.matches)
+    assert agree / len(res.matches) > 0.95
+    assert res.matched_kw_cos > 0.99

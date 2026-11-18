@@ -187,6 +187,8 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
     n_arch = len(ref.archetype_names)
     xd = BL.descriptors(bv, n_arch, bp.use_graph, bp.use_measures, None, bp.geometry_only)
     hm = BL.hop_matrix(bv, bp.hop_cap)
+    # bv.rows index the min_loc-filtered function table; scan arrays need scan rows.
+    scan_rows = np.flatnonzero(sc.loc >= min_loc)[bv.rows]
     keep_cols = [
         i for i, n in enumerate(ref.feature_names)
         if n not in ("log_complexity", "func_internal_density")
@@ -195,7 +197,7 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
         ref, sc.loc, sc.complexity, sc.args, sc.keyword_density, sc.signals,
         keyword_mode="composition",
     )[:, keep_cols]
-    comp = comp_all[bv.rows]
+    comp = comp_all[scan_rows]
     cnorm = comp / np.maximum(np.linalg.norm(comp, axis=1, keepdims=True), 1e-9)
     nbrs: dict[int, set[int]] = defaultdict(set)
     for u, v in bv.edges.tolist():
@@ -205,10 +207,10 @@ def _prep_repo(sc: ScanData, ref: Reference, bp: BL.BlindParams, min_loc: int) -
     arch = np.asarray(ft.archetype[bv.rows], dtype=np.int64)
     arch_cnt = np.bincount(arch, minlength=n_arch).astype(np.float64)
     arch_dist = arch_cnt / max(1.0, float(arch_cnt.sum()))
-    kw_norm, kw_dom, kw_dist = keyword_lattice_profile(sc.signals, bv.rows)
+    kw_norm, kw_dom, kw_dist = keyword_lattice_profile(sc.signals, scan_rows)
     return {
         "name": sc.name,
-        "rows": bv.rows,
+        "rows": scan_rows,
         "n": len(bv.rows),
         "xd": xd,
         "hm": hm,
