@@ -78,6 +78,32 @@ def same_function(name_a: str, name_b: str) -> bool:
     return na == norm_name(name_b) or ("_" not in name_a and na == norm_name(re.sub(r"^[a-z]{1,3}_", "", name_b)))
 
 
+def fr_layout(n: int, edges: list[tuple[int, int]], seed: int = 3, iters: int = 400) -> np.ndarray:
+    """Fruchterman-Reingold with a weak pull to the centre (keeps small components near the main one);
+    deterministic. Returns positions scaled into [-1, 1]."""
+    rng = np.random.default_rng(seed)
+    pos = rng.uniform(-1, 1, (n, 2))
+    e = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    k = 2.0 / np.sqrt(n)
+    temp = 0.1
+    for _ in range(iters):
+        delta = pos[:, None, :] - pos[None, :, :]
+        dist = np.maximum(np.linalg.norm(delta, axis=2), 1e-4)
+        disp = ((k * k / dist**2)[:, :, None] * delta).sum(axis=1)
+        if len(e):
+            d = pos[e[:, 0]] - pos[e[:, 1]]
+            ln = np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-4)
+            f = d * ln / k
+            np.add.at(disp, e[:, 0], -f)
+            np.add.at(disp, e[:, 1], f)
+        disp -= pos * 0.6 * k * np.sqrt(n) / 4
+        ln = np.maximum(np.linalg.norm(disp, axis=1, keepdims=True), 1e-9)
+        pos += disp / ln * np.minimum(ln, temp)
+        temp = max(0.002, temp * 0.985)
+    lo, hi = np.percentile(pos, 1, axis=0), np.percentile(pos, 99, axis=0)
+    return np.clip((pos - (lo + hi) / 2) / ((hi - lo) / 2), -1, 1)
+
+
 def run_steps(sc_a, sc_b, ref, *, use_delta=True, min_loc=3, alpha=0.5, eps=0.05, outer=40, hops=3, seed_frac=0.15):
     """The library's algorithm, step by step, keeping what the film needs."""
     bp = BL.BlindParams()
@@ -160,6 +186,11 @@ def main(argv=None) -> int:
     if ours != lib_pairs or lib.t1_n != len(top):
         raise SystemExit("refusing: step-by-step replay differs from seed_and_extend_with_lattice")
 
+    verdict = {(m.row_a, m.row_b): (m.sufficient, m.evidence) for m in lib.matches}
+
+    def suff(q, r):
+        return verdict[(int(A["rows"][q]), int(B["rows"][r]))]
+
     name_a = [sc_a.func_name[int(r)] for r in A["rows"]]
     name_b = [sc_b.func_name[int(r)] for r in B["rows"]]
     file_a = [sc_a.file_path[int(sc_a.func_file[int(r)])] for r in A["rows"]]
@@ -197,6 +228,18 @@ def main(argv=None) -> int:
         "matched_arch_agree": round(lib.matched_arch_agree, 4),
         "post_delta_res": round(lib.post_delta_res, 4),
         "tiers": tiers,
+    }
+    sg = Counter(grade(q, r) for q, r in matched.items() if suff(q, r)[0])
+    summary["evidence"] = {
+        "fdr": lib.evidence.fdr,
+        "draws": lib.evidence.draws,
+        "est_fdr": round(lib.evidence.est_fdr, 4),
+        "threshold": round(lib.evidence.threshold, 4),
+        "decoy_passing_per_draw": round(lib.evidence.decoy_passing, 2),
+        "sufficient": lib.evidence.n_sufficient,
+        "right": sg["right"],
+        "wrong": sg["wrong"],
+        "unkeyed": sg["unkeyed"],
     }
 
     def n_right(pairs):
@@ -301,12 +344,51 @@ def main(argv=None) -> int:
                 "kw_cos": round(float(np.dot(A["kw_norm"][q], B["kw_norm"][r])), 3),
                 "arch_agree": bool(A["arch"][q] == B["arch"][r]),
                 "transport_rank": int(np.argsort(-T[q]).tolist().index(r)) + 1,
+                "sufficient": suff(q, r)[0],
+                "evidence": round(suff(q, r)[1], 3),
                 "why": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in why.get(q, {}).items()}
                 | ({"via": [ia[u] for u in why[q]["via"] if u in ia]} if q in why else {}),
             }
         )
 
     reciprocal = {qi for qi, _, _ in seeds}
+
+    def full_map():
+        """Every original function, laid out on its own call graph, with its final verdict."""
+        e_all = sorted({(min(u, v), max(u, v)) for u in range(A["n"]) for v in A["nbrs"][u] if u != v})
+        # functions with no resolved call go in a band along the bottom; the rest on their call graph above it
+        deg = np.zeros(A["n"], dtype=np.int64)
+        for u, v in e_all:
+            deg[u] += 1
+            deg[v] += 1
+        con = np.flatnonzero(deg > 0)
+        iso = np.flatnonzero(deg == 0)
+        idx = {int(q): k for k, q in enumerate(con)}
+        sub = fr_layout(len(con), [(idx[u], idx[v]) for u, v in e_all])
+        xy = np.zeros((A["n"], 2))
+        xy[con, 0] = sub[:, 0]
+        xy[con, 1] = sub[:, 1] * 0.84 - 0.16
+        cols = max(1, int(np.ceil(len(iso) / 2)))
+        for k, q in enumerate(iso):
+            xy[q] = (-1 + 2 * (k % cols + 0.5) / cols, 0.86 + 0.1 * (k // cols))
+
+        def status(q):
+            if q not in matched:
+                return "unmatched"
+            if not suff(q, matched[q])[0]:
+                return "insufficient"
+            return {"right": "confirmed", "wrong": "wrong"}.get(grade(q, matched[q]), "unchecked")
+
+        st = [status(q) for q in range(A["n"])]
+        return {
+            "xy": xy.round(4).tolist(),
+            "status": st,
+            "edges": e_all,
+            "drawn": [int(q) for q in qa],
+            "no_calls": len(iso),
+            "counts": dict(Counter(st)),
+        }
+
     out = {
         "source": {
             "a": {
@@ -347,6 +429,7 @@ def main(argv=None) -> int:
         ],
         "nodes_b": [{"name": name_b[r], "file": file_b[r], "kw": kw_profile(sc_b, int(B["rows"][r]))} for r in qb],
         "edges_a": edges_a,
+        "full_map": full_map(),
         "edges_b": edges_b,
         "pairs": pairs,
         "signals": [SIGNAL_LABEL.get(c, c) for c in ref.signal_columns],

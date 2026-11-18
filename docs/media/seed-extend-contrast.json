@@ -46,6 +46,17 @@
     "unkeyed": 30
    }
   ],
+  "evidence": {
+   "fdr": 0.02,
+   "draws": 5,
+   "est_fdr": 0.2167,
+   "threshold": 0.0,
+   "decoy_passing_per_draw": 0.0,
+   "sufficient": 0,
+   "right": 0,
+   "wrong": 0,
+   "unkeyed": 0
+  },
   "ablation": {
    "shape_only_pairs": 42,
    "shape_only_right": 0,

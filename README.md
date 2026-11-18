@@ -19,10 +19,11 @@ the last step.
    other; only the strongest 15% are kept as anchors (66).
 3. **Extend:** the C → Go offset is measured on the anchors. Then, for 3 hops, a caller or callee of a matched function
    is paired with its partner's unclaimed neighbour that is closest in shape. 66 → 276 → 482 → 598 matched (77%).
-4. **Fingerprint:** each matched pair's keyword mix is compared. Pair by pair it separates the port from a Rust rewrite
-   (cosine 0.74 vs 0.56); the codebase-wide mix cannot (JSD 0.39 vs 0.40).
-5. **Answer key:** names, never used to match, grade it. 364 of 598 pairs are the same function: 62 of 66 anchors, then
-   fewer with each hop. Shape alone, without the call graph, gets 220 of 329.
+4. **Fingerprint check (evidence quality):** extend finds partners even in unrelated code, so every pair's keyword
+   fingerprint and shape are checked against decoys. A pair passes with *sufficient evidence* or is held back.
+   gore: 121 of 598 pairs pass. rust-doom, a from-scratch rewrite: 0 of 123. Random pairing: 0 of 777 right.
+5. **Answer key:** names, never used to match, grade it. Without the check, 364 of 598 matches are the same function.
+   With it, 108 of 121 (89%) are; the zoom-out shows all 777 functions with their verdict.
 
 Details, caveats and how to regenerate: [`docs/media/README.md`](docs/media/README.md) ·
 [MP4](docs/media/seed-extend.mp4)
@@ -65,6 +66,11 @@ Compare two pre-scanned DBs or raw source repositories (with `[scan]` installed)
 sfs lattice-compare repo_a/ repo_b/ --lens portable --json
 sfs lattice-compare repo_a/ repo_b/ --lens portable --matches --verify --issue-out epic.md
 ```
+
+Every matched pair also gets an evidence verdict (`sufficient` in `--matches` output, a count in the summary). The
+threshold is calibrated on decoys at a 2% false-pass rate (`--evidence-fdr`, `0` to skip). The rate is against random
+functions of the same kind; near-identical siblings are not covered by it
+(see [`docs/media/README.md`](docs/media/README.md#caveats)).
 
 ### 2. Scan Quality Verification & GitGalaxy Triage (`sfs quality`)
 Guard against under-tuned language regexes or slicers before trusting downstream numbers:

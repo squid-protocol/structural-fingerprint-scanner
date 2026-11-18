@@ -10,8 +10,11 @@ step-by-step replay equals ``seed_and_extend_with_lattice``). The film:
    other are reciprocal best; the strongest 15% become anchors;
 3. EXTEND: the C-to-Go offset is measured on the anchors; then, three times, a neighbour of a matched function is
    paired with the closest unclaimed neighbour of its partner;
-4. FINGERPRINT: each matched pair's 32-family keyword mix is compared, against a rewrite that shares no code;
-5. ANSWER KEY: names, never used to match, grade every pair.
+4. FINGERPRINT CHECK: each matched pair's keyword fingerprint and shape must beat decoys (the library's evidence
+   gate, ``MatchedPair.sufficient``); two pairs in full on a log scale, then a sweep over every drawn pair, then the
+   totals next to a rewrite that shares no code and a random pairing;
+5. ANSWER KEY: names, never used to match, grade every pair; the camera zooms out to every original function,
+   coloured by its final verdict.
 
     python tools/media/seed_extend_data.py --a <linuxdoom scan> --b <gore scan> --out <work>/se-gore.json
     python tools/media/seed_extend_data.py --a <linuxdoom scan> --b <rust-doom scan> --summary-only --out <work>/se-rust.json
@@ -52,19 +55,25 @@ f_smallb = font("DejaVuSans-Bold.ttf", 14)
 f_tiny = font("DejaVuSans.ttf", 12)
 f_name = font("DejaVuSansMono.ttf", 11)
 f_big = font("DejaVuSans-Bold.ttf", 30)
+f_huge = font("DejaVuSans-Bold.ttf", 52)
 f_mono = font("DejaVuSansMono.ttf", 14)
 
 BG, PANEL, PANEL2 = (12, 15, 30), (20, 24, 43), (28, 33, 58)
 INK, INK2, MUTED, FAINT = (240, 239, 236), (195, 194, 183), (130, 132, 150), (62, 66, 92)
 NODE = (128, 142, 186)  # not matched yet: muted, so each hop colour stands out
 GOLD = (250, 204, 21)
-HOP = [(250, 204, 21), (45, 212, 191), (56, 189, 248), (167, 139, 250)]  # anchors, hop 1, 2, 3
-RIGHT, WRONG, UNKEYED = (74, 222, 128), (248, 113, 113), (148, 150, 168)
+HOP = [(250, 204, 21), (56, 189, 248), (129, 140, 248), (192, 132, 252)]  # anchors, hop 1, 2, 3
 A_COL, B_COL = (96, 165, 250), (244, 114, 182)
+B_NODE = (186, 128, 162)
+# verdicts: neutral, not traffic-light
+PASS, FAIL, AMBER, DARK = (45, 212, 191), (104, 112, 140), (245, 180, 60), (52, 57, 78)
+STATUS_COL = {"confirmed": PASS, "wrong": AMBER, "unchecked": AMBER, "insufficient": FAIL, "unmatched": DARK}
+STATUS_Z = {"unmatched": 0, "insufficient": 1, "confirmed": 2, "wrong": 3, "unchecked": 3}
+LANG = {"c": "C", "go": "Go", "rust": "Rust", "cpp": "C++"}
 
-STEPS = ["1 Read", "2 Match", "3 Extend", "4 Fingerprint", "5 Answer key"]
-# seconds: read, match, offset, hop1, hop2, hop3, fingerprint, key, hold
-T_READ, T_MATCH, T_OFF, T_HOP, T_FP, T_KEY, T_HOLD = 7.0, 9.0, 6.0, 4.5, 13.0, 9.0, 6.0
+STEPS = ["1 Read", "2 Match", "3 Extend", "4 Fingerprint check", "5 Answer key"]
+# seconds: read, match, offset, each hop, fingerprint check, answer key + zoom out, hold
+T_READ, T_MATCH, T_OFF, T_HOP, T_VER, T_KEY, T_HOLD = 7.0, 9.0, 6.0, 4.5, 21.0, 12.0, 6.0
 
 
 def lerp(a, b, t):
@@ -206,6 +215,8 @@ class Film:
             acc += t["n"]
             cum.append(acc)
         self.cum = cum
+        self.sweep = sorted(d["pairs"], key=lambda p: (p["tier"], p["a"]))
+        self.sweep_rank = {id(p): k for k, p in enumerate(self.sweep)}
         self.labels = {
             "a": self.place_labels(
                 [n["name"] for n in d["nodes_a"]], [self.pos_a[i] for i in range(self.na)], self.cxA
@@ -214,190 +225,6 @@ class Film:
                 [n["name"] for n in d["nodes_b"]], [self.final_b[j] for j in range(self.nb)], self.cxB
             ),
         }
-
-    # time of each part
-    def t0(self, part):
-        order = ["read", "match", "off", "hop1", "hop2", "hop3", "fp", "key", "hold"]
-        dur = [T_READ, T_MATCH, T_OFF, T_HOP, T_HOP, T_HOP, T_FP, T_KEY, T_HOLD]
-        return sum(dur[: order.index(part)])
-
-    @property
-    def total(self):
-        return self.t0("hold") + T_HOLD
-
-    def matched_at(self, t):
-        """Tier reached by time t (-1: nothing matched) and progress inside the current reveal."""
-        if t < self.t0("match") + 4.5:
-            return -1, 0.0
-        if t < self.t0("hop1"):
-            return 0, ease((t - self.t0("match") - 4.5) / 2.0)
-        for k in (1, 2, 3):
-            s = self.t0(f"hop{k}")
-            if t < s + T_HOP:
-                return k, ease((t - s - 0.6) / 2.6)
-        return 3, 1.0
-
-    def node_b_pos(self, j, t):
-        p = self.pair_of_b.get(j)
-        tier, prog = self.matched_at(t)
-        if p is not None:
-            if p["tier"] < tier or (p["tier"] == tier and prog >= 1):
-                f = 1.0
-            elif p["tier"] == tier:
-                f = prog
-            else:
-                f = 0.0
-        else:
-            f = ease((t - self.t0("hop3") - 2.6) / 1.5)
-        a, b = self.scr[j], self.final_b[j]
-        return lerp(a[0], b[0], ease(f)), lerp(a[1], b[1], ease(f))
-
-    def step(self, t):
-        if t < self.t0("match"):
-            return 0
-        if t < self.t0("off"):
-            return 1
-        if t < self.t0("fp"):
-            return 2
-        if t < self.t0("key"):
-            return 3
-        return 4
-
-    # -----------------------------------------------------------------------------------------------------------
-    def frame(self, t):
-        im = Image.new("RGB", (W, H), BG)
-        d = ImageDraw.Draw(im, "RGBA")
-        st = self.step(t)
-        d.text((W // 2, 22), "How sfs finds a port: match, extend, fingerprint", font=f_title, fill=INK, anchor="mm")
-        cw = 190
-        x0 = W // 2 - cw * len(STEPS) // 2
-        for k, s in enumerate(STEPS):
-            on = k == st
-            done = k < st
-            col = GOLD if on else (INK2 if done else MUTED)
-            d.rounded_rectangle(
-                (x0 + k * cw + 6, 42, x0 + (k + 1) * cw - 6, 68),
-                13,
-                fill=PANEL2 if on else PANEL,
-                outline=GOLD if on else FAINT,
-                width=2 if on else 1,
-            )
-            d.text((x0 + k * cw + cw // 2, 55), ("✓ " if done else "") + s, font=f_chip, fill=col, anchor="mm")
-        src = self.d["source"]
-        for cx, side, col in ((self.cxA, "a", A_COL), (self.cxB, "b", B_COL)):
-            d.rounded_rectangle((cx - 308, 80, cx + 308, 588), 14, fill=PANEL)
-            s = src[side]
-            d.text((cx - 292, 92), f"{s['name']}", font=f_head, fill=col)
-            lang = {"c": "C", "go": "Go", "rust": "Rust", "cpp": "C++"}.get(s["language"], s["language"])
-            d.text((cx + 292, 94), f"{lang} · {s['functions']} functions", font=f_small, fill=INK2, anchor="ra")
-        d.text((self.cxA - 292, 566), "the original", font=f_tiny, fill=MUTED)
-        d.text((self.cxB - 292, 566), "a port into another language", font=f_tiny, fill=MUTED)
-        d.text(
-            (self.cxB + 292, 566), "a few of each codebase's functions are drawn", font=f_tiny, fill=MUTED, anchor="ra"
-        )
-        self.graphs(d, t)
-        if self.t0("off") <= t < self.t0("hop1"):
-            self.offset_card(d, t)
-        if self.t0("fp") <= t < self.t0("key") + 0.8:
-            self.fingerprint_card(d, t)
-        self.caption(d, t)
-        self.counter(d, t)
-        d.text((W - 18, H - 8), "GitGalaxy · sfs", font=f_smallb, fill=(240, 239, 236, 210), anchor="rd")
-        return im
-
-    def graphs(self, d, t):
-        appear = ease(t / 1.5)
-        tier, prog = self.matched_at(t)
-        key = ease((t - self.t0("key")) / 1.5)
-        PA = {i: (self.cxA + x, self.cy + y) for i, (x, y) in self.pos_a.items()}
-        PB = {j: (self.cxB + x, self.cy + y) for j, (x, y) in ((j, self.node_b_pos(j, t)) for j in range(self.nb))}
-
-        def a_state(i):
-            p = self.pair_of_a.get(i)
-            if p is None:
-                return None, 0.0
-            if p["tier"] < tier or (p["tier"] == tier and prog >= 1):
-                return p, 1.0
-            if p["tier"] == tier:
-                return p, prog
-            return None, 0.0
-
-        # hop wave: the calls the extension walks light up while that hop runs
-        for edges, P, side in ((self.d["edges_a"], PA, "a"), (self.d["edges_b"], PB, "b")):
-            for u, v in edges:
-                col = fade(FAINT, appear)
-                w = 1
-                if side == "a" and tier >= 1 and 0 < prog < 1:
-                    pu, pv = self.pair_of_a.get(u), self.pair_of_a.get(v)
-                    if pu and pv and {pu["tier"], pv["tier"]} == {tier - 1, tier}:
-                        col, w = mix(FAINT, HOP[tier], 0.9), 2
-                d.line((P[u], P[v]), fill=col, width=w)
-        lab = ease((t - self.t0("key") - 1.0) / 1.5)
-        for i in range(self.na):
-            x, y = PA[i]
-            p, f = a_state(i)
-            col = NODE
-            if p is not None:
-                col = mix(NODE, HOP[p["tier"]], f)
-                if key > 0:
-                    col = mix(col, {"right": RIGHT, "wrong": WRONG}.get(p["grade"], UNKEYED), key)
-            elif self.d["nodes_a"][i]["tier"] is None and t > self.t0("hop3") + 3:
-                col = mix(NODE, (90, 94, 118), ease((t - self.t0("hop3") - 3) / 1.0))
-            r = 9 if (p is not None and p["tier"] == 0 and f > 0) else 7
-            if p is not None and p["tier"] == 0 and f > 0:
-                d.ellipse((x - r - 5, y - r - 5, x + r + 5, y + r + 5), outline=(*GOLD, int(120 * f)), width=2)
-            d.ellipse((x - r, y - r, x + r, y + r), fill=fade(col, appear))
-        for j in range(self.nb):
-            x, y = PB[j]
-            p = self.pair_of_b.get(j)
-            col = (186, 128, 162)
-            if p is not None:
-                _, f = a_state(p["a"])
-                col = mix(col, HOP[p["tier"]], f)
-                if key > 0:
-                    col = mix(col, {"right": RIGHT, "wrong": WRONG}.get(p["grade"], UNKEYED), key)
-            elif t > self.t0("hop3") + 3:
-                col = mix(col, (90, 94, 118), ease((t - self.t0("hop3") - 3) / 1.0))
-            r = 9 if (p is not None and p["tier"] == 0 and a_state(p["a"])[1] > 0) else 7
-            d.ellipse((x - r, y - r, x + r, y + r), fill=fade(col, appear))
-        if lab > 0:
-            for side, nodes in (("a", self.d["nodes_a"]), ("b", self.d["nodes_b"])):
-                for k, n in enumerate(nodes):
-                    lx, ly, anc = self.labels[side][k]
-                    d.text((lx, ly), n["name"], font=f_name, fill=(*INK, int(235 * lab)), anchor=anc)
-        m0 = self.t0("match")
-        # match: every drawn function whose transport partner picks it back gets a ring; most fade, anchors stay
-        if m0 + 0.4 <= t < self.t0("off"):
-            rec = [i for i, n in enumerate(self.d["nodes_a"]) if n["reciprocal"]]
-            for k, i in enumerate(rec):
-                on = ease((t - m0 - 0.4 - 0.12 * k) / 0.4)
-                p = self.pair_of_a.get(i)
-                off = 0.0 if (p is not None and p["tier"] == 0) else ease((t - m0 - 4.6) / 0.8)
-                a = on * (1 - off)
-                if a > 0:
-                    x, y = PA[i]
-                    d.ellipse((x - 13, y - 13, x + 13, y + 13), outline=(*INK, int(200 * a)), width=2)
-        # anchor links across the gap while matching
-        if m0 + 4.5 <= t < self.t0("off") + 0.5:
-            f = ease((t - m0 - 4.5) / 1.5) * (1 - ease((t - self.t0("off")) / 0.5))
-            for p in self.d["pairs"]:
-                if p["tier"] == 0:
-                    a, b = PA[p["a"]], PB[p["b"]]
-                    mid = ((a[0] + b[0]) / 2, min(a[1], b[1]) - 120)
-                    pts = [
-                        (
-                            (1 - s) ** 2 * a[0] + 2 * (1 - s) * s * mid[0] + s * s * b[0],
-                            (1 - s) ** 2 * a[1] + 2 * (1 - s) * s * mid[1] + s * s * b[1],
-                        )
-                        for s in [k / 30 for k in range(31)]
-                    ]
-                    d.line(pts, fill=(*GOLD, int(220 * f)), width=2)
-        # read: one function from each side opens into its shape
-        r0 = 2.0
-        if r0 <= t < self.t0("match") + 0.3:
-            f = ease((t - r0) / 1.0) * (1 - ease((t - self.t0("match")) / 0.3))
-            self.shape_popup(d, PA[0], self.d["nodes_a"][0], A_COL, f)
-            self.shape_popup(d, PB[0], self.d["nodes_b"][0], B_COL, f)
 
     def place_labels(self, names, rel, cx):
         """Greedy: each label takes the first candidate spot that stays in the panel and clears the nodes and the
@@ -518,98 +345,410 @@ class Film:
             fill=(*INK2, a),
         )
 
-    def fingerprint_card(self, d, t):
-        s0 = self.t0("fp")
-        f = ease((t - s0) / 0.6) * (1 - ease((t - self.t0("key") - 0.2) / 0.6))
-        a = int(255 * f)
-        x0, y0, w, h = 46, 104, W - 92, 470
-        d.rounded_rectangle(
-            (x0, y0, x0 + w, y0 + h), 14, fill=(22, 26, 48, int(248 * f)), outline=(*HOP[2], int(200 * f)), width=2
-        )
-        d.text(
-            (x0 + 20, y0 + 16),
-            "Fingerprint every matched pair: the mix of its 32 keyword families",
-            font=f_head,
-            fill=(*INK, a),
-        )
-        # one real pair, bars mirrored
-        p = self.d["pairs"][self.d["fp_pair"]]
+    # time of each part
+    ORDER = ("read", "match", "off", "hop1", "hop2", "hop3", "ver", "key", "hold")
+    DUR = (T_READ, T_MATCH, T_OFF, T_HOP, T_HOP, T_HOP, T_VER, T_KEY, T_HOLD)
+
+    def t0(self, part):
+        return sum(self.DUR[: self.ORDER.index(part)])
+
+    @property
+    def total(self):
+        return self.t0("hold") + T_HOLD
+
+    def matched_at(self, t):
+        """Tier reached by time t (-1: nothing matched) and progress inside the current reveal."""
+        if t < self.t0("match") + 4.5:
+            return -1, 0.0
+        if t < self.t0("hop1"):
+            return 0, ease((t - self.t0("match") - 4.5) / 2.0)
+        for k in (1, 2, 3):
+            s = self.t0(f"hop{k}")
+            if t < s + T_HOP:
+                return k, ease((t - s - 0.6) / 2.6)
+        return 3, 1.0
+
+    def node_b_pos(self, j, t):
+        p = self.pair_of_b.get(j)
+        tier, prog = self.matched_at(t)
+        if p is not None:
+            if p["tier"] < tier or (p["tier"] == tier and prog >= 1):
+                f = 1.0
+            elif p["tier"] == tier:
+                f = prog
+            else:
+                f = 0.0
+        else:
+            f = ease((t - self.t0("hop3") - 2.6) / 1.5)
+        a, b = self.scr[j], self.final_b[j]
+        return lerp(a[0], b[0], ease(f)), lerp(a[1], b[1], ease(f))
+
+    def step(self, t):
+        for k, part in enumerate(("match", "off", "ver", "key")):
+            if t < self.t0(part):
+                return k if part != "ver" else 2
+        return 4
+
+    # the per-pair check sweeps through the drawn pairs, anchors first
+    SWEEP_START, SWEEP_EACH = 7.6, 0.34
+
+    def sweep_t(self, k):
+        return self.t0("ver") + self.SWEEP_START + self.SWEEP_EACH * k
+
+    def checked(self, p, t):
+        """0..1: how far the drawn pair's verdict has been revealed."""
+        return ease((t - self.sweep_t(self.sweep_rank[id(p)]) - 0.35) / 0.4)
+
+    def zoom(self, t):
+        return ease((t - self.t0("key") - 4.0) / 3.5)
+
+    # -----------------------------------------------------------------------------------------------------------
+    def frame(self, t):
+        im = Image.new("RGB", (W, H), BG)
+        d = ImageDraw.Draw(im, "RGBA")
+        st = self.step(t)
+        d.text((W // 2, 22), "How sfs finds a port: match, extend, fingerprint", font=f_title, fill=INK, anchor="mm")
+        cw = 200
+        x0 = W // 2 - cw * len(STEPS) // 2
+        for k, s in enumerate(STEPS):
+            on = k == st
+            done = k < st
+            col = GOLD if on else (INK2 if done else MUTED)
+            d.rounded_rectangle(
+                (x0 + k * cw + 6, 42, x0 + (k + 1) * cw - 6, 68),
+                13,
+                fill=PANEL2 if on else PANEL,
+                outline=GOLD if on else FAINT,
+                width=2 if on else 1,
+            )
+            d.text((x0 + k * cw + cw // 2, 55), ("✓ " if done else "") + s, font=f_chip, fill=col, anchor="mm")
+        z = self.zoom(t)
+        if z < 1:
+            pa = 1 - z
+            src = self.d["source"]
+            for cx, side, col in ((self.cxA, "a", A_COL), (self.cxB, "b", B_COL)):
+                d.rounded_rectangle((cx - 308, 80, cx + 308, 588), 14, fill=fade(PANEL, pa))
+                s = src[side]
+                d.text((cx - 292, 92), f"{s['name']}", font=f_head, fill=fade(col, pa))
+                lang = LANG.get(s["language"], s["language"])
+                d.text(
+                    (cx + 292, 94),
+                    f"{lang} · {s['functions']} functions",
+                    font=f_small,
+                    fill=fade(INK2, pa),
+                    anchor="ra",
+                )
+            d.text((self.cxA - 292, 566), "the original", font=f_tiny, fill=fade(MUTED, pa))
+            d.text((self.cxB - 292, 566), "a port into another language", font=f_tiny, fill=fade(MUTED, pa))
+            d.text(
+                (self.cxB + 292, 566),
+                "a few of each codebase's functions are drawn",
+                font=f_tiny,
+                fill=fade(MUTED, pa),
+                anchor="ra",
+            )
+            self.graphs(d, t, pa)
+        if z > 0:
+            self.full_map(d, t, z)
+        if self.t0("off") <= t < self.t0("hop1"):
+            self.offset_card(d, t)
+        v0 = self.t0("ver")
+        if v0 <= t < v0 + self.SWEEP_START:
+            self.check_cards(d, t)
+        if v0 + T_VER - 5.6 <= t < self.t0("key") + 0.4:
+            self.verdict_card(d, t)
+        self.caption(d, t)
+        self.counter(d, t)
+        d.text((W - 18, H - 8), "GitGalaxy · sfs", font=f_smallb, fill=(240, 239, 236, 210), anchor="rd")
+        return im
+
+    def pair_colour(self, p, t, base):
+        """Hop colour once matched; teal or slate once checked; teal or amber once graded."""
+        c = self.checked(p, t)
+        col = mix(base, PASS if p["sufficient"] else FAIL, c)
+        key = ease((t - self.t0("key")) / 1.2)
+        if p["sufficient"] and key > 0 and p["grade"] != "right":
+            col = mix(col, AMBER, key)
+        return col
+
+    def graphs(self, d, t, pa=1.0):
+        appear = ease(t / 1.5) * pa
+        tier, prog = self.matched_at(t)
+        PA = {i: (self.cxA + x, self.cy + y) for i, (x, y) in self.pos_a.items()}
+        PB = {j: (self.cxB + x, self.cy + y) for j, (x, y) in ((j, self.node_b_pos(j, t)) for j in range(self.nb))}
+        self.PA = PA
+
+        def a_state(i):
+            p = self.pair_of_a.get(i)
+            if p is None:
+                return None, 0.0
+            if p["tier"] < tier or (p["tier"] == tier and prog >= 1):
+                return p, 1.0
+            if p["tier"] == tier:
+                return p, prog
+            return None, 0.0
+
+        # hop wave: the calls the extension walks light up while that hop runs
+        for edges, P, side in ((self.d["edges_a"], PA, "a"), (self.d["edges_b"], PB, "b")):
+            for u, v in edges:
+                col = fade(FAINT, appear)
+                w = 1
+                if side == "a" and tier >= 1 and 0 < prog < 1:
+                    pu, pv = self.pair_of_a.get(u), self.pair_of_a.get(v)
+                    if pu and pv and {pu["tier"], pv["tier"]} == {tier - 1, tier}:
+                        col, w = mix(FAINT, HOP[tier], 0.9), 2
+                d.line((P[u], P[v]), fill=col, width=w)
+        lab = ease((t - self.t0("key") - 0.8) / 1.2) * pa
+        dim_after = self.t0("hop3") + 3
+        for i in range(self.na):
+            x, y = PA[i]
+            p, f = a_state(i)
+            col = NODE
+            if p is not None:
+                col = self.pair_colour(p, t, mix(NODE, HOP[p["tier"]], f))
+            elif self.d["nodes_a"][i]["tier"] is None and t > dim_after:
+                col = mix(NODE, DARK, ease((t - dim_after) / 1.0))
+            big = p is not None and p["tier"] == 0 and f > 0
+            r = 9 if big else 7
+            if big and t < self.t0("ver"):
+                d.ellipse((x - r - 5, y - r - 5, x + r + 5, y + r + 5), outline=(*GOLD, int(120 * f * pa)), width=2)
+            d.ellipse((x - r, y - r, x + r, y + r), fill=fade(col, appear))
+        for j in range(self.nb):
+            x, y = PB[j]
+            p = self.pair_of_b.get(j)
+            col = B_NODE
+            if p is not None:
+                _, f = a_state(p["a"])
+                col = self.pair_colour(p, t, mix(B_NODE, HOP[p["tier"]], f))
+            elif t > dim_after:
+                col = mix(B_NODE, DARK, ease((t - dim_after) / 1.0))
+            r = 9 if (p is not None and p["tier"] == 0 and a_state(p["a"])[1] > 0) else 7
+            d.ellipse((x - r, y - r, x + r, y + r), fill=fade(col, appear))
+        if lab > 0:
+            for side, nodes in (("a", self.d["nodes_a"]), ("b", self.d["nodes_b"])):
+                for k, n in enumerate(nodes):
+                    lx, ly, anc = self.labels[side][k]
+                    d.text((lx, ly), n["name"], font=f_name, fill=(*INK, int(235 * lab)), anchor=anc)
+        m0 = self.t0("match")
+        # match: every drawn function whose transport partner picks it back gets a ring; most fade, anchors stay
+        if m0 + 0.4 <= t < self.t0("off"):
+            rec = [i for i, n in enumerate(self.d["nodes_a"]) if n["reciprocal"]]
+            for k, i in enumerate(rec):
+                on = ease((t - m0 - 0.4 - 0.12 * k) / 0.4)
+                p = self.pair_of_a.get(i)
+                off = 0.0 if (p is not None and p["tier"] == 0) else ease((t - m0 - 4.6) / 0.8)
+                a = on * (1 - off)
+                if a > 0:
+                    x, y = PA[i]
+                    d.ellipse((x - 13, y - 13, x + 13, y + 13), outline=(*INK, int(200 * a)), width=2)
+        # anchor links across the gap while matching
+        if m0 + 4.5 <= t < self.t0("off") + 0.5:
+            f = ease((t - m0 - 4.5) / 1.5) * (1 - ease((t - self.t0("off")) / 0.5))
+            for p in self.d["pairs"]:
+                if p["tier"] == 0:
+                    a, b = PA[p["a"]], PB[p["b"]]
+                    mid = ((a[0] + b[0]) / 2, min(a[1], b[1]) - 120)
+                    pts = [
+                        (
+                            (1 - s) ** 2 * a[0] + 2 * (1 - s) * s * mid[0] + s * s * b[0],
+                            (1 - s) ** 2 * a[1] + 2 * (1 - s) * s * mid[1] + s * s * b[1],
+                        )
+                        for s in [k / 30 for k in range(31)]
+                    ]
+                    d.line(pts, fill=(*GOLD, int(220 * f)), width=2)
+        # read: one function from each side opens into its shape
+        r0 = 2.0
+        if r0 <= t < self.t0("match") + 0.3:
+            f = ease((t - r0) / 1.0) * (1 - ease((t - self.t0("match")) / 0.3))
+            self.shape_popup(d, PA[0], self.d["nodes_a"][0], A_COL, f)
+            self.shape_popup(d, PB[0], self.d["nodes_b"][0], B_COL, f)
+        # check: each pair's fingerprint pops up beside it with its verdict
+        for p in self.sweep:
+            s = self.sweep_t(self.sweep_rank[id(p)])
+            if s <= t < s + 1.1:
+                f = ease((t - s) / 0.2) * (1 - ease((t - s - 0.8) / 0.3))
+                self.mini_print(d, PA[p["a"]], p, f, self.checked(p, t))
+                self.mini_print(d, PB[p["b"]], p, f, self.checked(p, t))
+
+    def mini_print(self, d, xy, p, f, verdict):
+        """A small fingerprint: the pair's two 32-family mixes, one above the other, and the verdict."""
+        if f <= 0:
+            return
+        x, y = xy
+        w, h = 74, 40
+        x0, y0 = x - w / 2, y - h - 16
         ka, kb = self.d["nodes_a"][p["a"]]["kw"], self.d["nodes_b"][p["b"]]["kw"]
-        mx = max(max(ka), max(kb)) or 1
-        bx, by, bw = x0 + 24, y0 + 60, 15
-        grow = ease((t - s0 - 0.6) / 1.2)
+        a = int(255 * f)
+        col = mix(INK2, PASS if p["sufficient"] else FAIL, verdict)
+        d.rounded_rectangle((x0, y0, x0 + w, y0 + h), 5, fill=(26, 30, 54, int(235 * f)), outline=(*col, a), width=2)
+        bw = (w - 8) / len(ka)
         for k in range(len(ka)):
-            xx = bx + k * bw
-            ha, hb = 80 * ka[k] / mx * grow, 80 * kb[k] / mx * grow
-            d.rectangle((xx, by + 90 - ha, xx + bw - 3, by + 90), fill=(*A_COL, a))
-            d.rectangle((xx, by + 94, xx + bw - 3, by + 94 + hb), fill=(*B_COL, a))
+            ha, hb = 13 * logshare(ka[k]), 13 * logshare(kb[k])
+            xx = x0 + 4 + k * bw
+            d.rectangle((xx, y0 + 18 - ha, xx + bw - 0.6, y0 + 18), fill=(*A_COL, a))
+            d.rectangle((xx, y0 + 21, xx + bw - 0.6, y0 + 21 + hb), fill=(*B_COL, a))
+        if verdict > 0.5:
+            mark = "✓" if p["sufficient"] else "✗"
+            d.text((x0 + w + 3, y0 + h / 2), mark, font=f_smallb, fill=(*col, a), anchor="lm")
+
+    def full_map(self, d, t, z):
+        """Zoom out: every original function on its own call graph, coloured by its final verdict."""
+        fm = self.d["full_map"]
+        cx, cy, sx, sy = W / 2, 338, 590, 238
+        P = [(cx + x * sx, cy + y * sy) for x, y in fm["xy"]]
+        drawn = {q: i for i, q in enumerate(fm["drawn"])}
+        if getattr(self, "PA", None):
+            for q, i in drawn.items():
+                a, b = self.PA[i], P[q]
+                P[q] = (lerp(a[0], b[0], z), lerp(a[1], b[1], z))
+        ea = int(70 * z)
+        for u, v in fm["edges"]:
+            d.line((P[u], P[v]), fill=(*FAINT, ea), width=1)
+        order = sorted(range(len(P)), key=lambda q: STATUS_Z[fm["status"][q]])
+        for q in order:
+            x, y = P[q]
+            st = fm["status"][q]
+            col = STATUS_COL[st]
+            r = 4.2 if st in ("confirmed", "wrong", "unchecked") else 3.2
+            a = z if q not in drawn else 1.0
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(*col, int(255 * a)))
+        la = ease((t - self.t0("key") - 7.0) / 1.0)
+        if la <= 0:
+            return
         d.text(
-            (bx, by + 192),
-            "one matched pair (hop " + str(p["tier"]) + "): original above, port below",
-            font=f_small,
-            fill=(*INK2, a),
-        )
-        top = sorted(range(len(ka)), key=lambda k: -(ka[k] + kb[k]))[:3]
-        d.text(
-            (bx, by + 212),
-            "biggest families: " + ", ".join(self.d["signals"][k] for k in top),
+            (cx - sx, cy + 0.80 * sy),
+            f"{fm['no_calls']} functions with no resolved call",
             font=f_tiny,
-            fill=(*MUTED, a),
+            fill=(*MUTED, int(255 * la)),
         )
-        g = self.d["summary"]
-        notes = [
-            "Each bar: the share of the function's keyword hits in one family.",
-            "Cosine 1.0 means the same mix. Names play no part.",
-            f"The median over all {g['matched']} matched pairs is the 'pair keyword",
-            "cosine' in the table, next to the same check on a rewrite.",
-        ]
-        for k, line in enumerate(notes):
-            d.text((bx, by + 262 + 22 * k), line, font=f_small, fill=(*INK2, a))
-        d.text((bx + 32 * bw + 18, by + 70), f"{p['kw_cos']:.2f}", font=f_big, fill=(*HOP[2], a))
-        d.text((bx + 32 * bw + 18, by + 108), "cosine of", font=f_tiny, fill=(*INK2, a))
-        d.text((bx + 32 * bw + 18, by + 122), "the two mixes", font=f_tiny, fill=(*INK2, a))
-        # the table: port vs a rewrite that shares no code
-        g, r = self.d["summary"], self.c["summary"]
-        tf = ease((t - s0 - 3.5) / 1.0)
-        ta = int(255 * f * tf)
-        tx, ty = x0 + 680, y0 + 56
-        d.text((tx, ty), "", font=f_small)
-        d.text((tx + 290, ty), g["b"], font=f_smallb, fill=(*B_COL, ta), anchor="ma")
-        d.text((tx + 400, ty), r["b"], font=f_smallb, fill=(*UNKEYED, ta), anchor="ma")
-        d.text((tx + 290, ty + 18), "Go port", font=f_tiny, fill=(*MUTED, ta), anchor="ma")
-        d.text((tx + 400, ty + 18), "Rust rewrite", font=f_tiny, fill=(*MUTED, ta), anchor="ma")
+        c = fm["counts"]
         rows = [
-            ("anchors", f"{g['anchors']}", f"{r['anchors']}"),
-            ("functions matched", f"{g['coverage']:.0%}", f"{r['coverage']:.0%}"),
-            ("pair keyword cosine", f"{g['matched_kw_cos']:.2f}", f"{r['matched_kw_cos']:.2f}"),
-            ("same archetype", f"{g['matched_arch_agree']:.0%}", f"{r['matched_arch_agree']:.0%}"),
-            ("same top family", f"{g['matched_kw_dom_agree']:.0%}", f"{r['matched_kw_dom_agree']:.0%}"),
+            ("confirmed", "sufficient evidence, same function by name", c.get("confirmed", 0)),
+            ("wrong", "sufficient evidence, not confirmed by name", c.get("wrong", 0) + c.get("unchecked", 0)),
+            ("insufficient", "matched, insufficient evidence", c.get("insufficient", 0)),
+            ("unmatched", "no partner found", c.get("unmatched", 0)),
         ]
-        for k, (lab, v1, v2) in enumerate(rows):
-            yy = ty + 50 + k * 32
-            d.text((tx, yy), lab, font=f_small, fill=(*INK, ta))
-            d.text((tx + 290, yy), v1, font=f_smallb, fill=(*INK, ta), anchor="ma")
-            d.text((tx + 400, yy), v2, font=f_smallb, fill=(*INK2, ta), anchor="ma")
-        uf = ease((t - s0 - 7.0) / 1.0)
-        ua = int(255 * f * uf)
-        yy = ty + 50 + 5 * 32 + 14
-        d.line((tx, yy - 6, tx + 450, yy - 6), fill=(*FAINT, ua))
-        d.text((tx, yy), "whole-codebase mix (JSD)", font=f_small, fill=(*INK, ua))
-        d.text((tx + 290, yy), f"{g['kw_jsd']:.2f}", font=f_smallb, fill=(*WRONG, ua), anchor="ma")
-        d.text((tx + 400, yy), f"{r['kw_jsd']:.2f}", font=f_smallb, fill=(*WRONG, ua), anchor="ma")
-        d.text((tx, yy + 26), "The codebase-wide keyword mix cannot tell a port", font=f_tiny, fill=(*INK2, ua))
-        d.text((tx, yy + 42), "from a rewrite. Compared pair by pair along the", font=f_tiny, fill=(*INK2, ua))
-        d.text((tx, yy + 58), "matches, it can.", font=f_tiny, fill=(*INK2, ua))
-        d.text(
-            (x0 + 24, y0 + h - 30),
-            f"{r['a']} vs {r['b']}, a from-scratch engine with no declared lineage, run through the same steps.",
-            font=f_tiny,
-            fill=(*MUTED, ta),
-        )
+        x0, y0 = 880, 600
+        for k, (st, lab, n) in enumerate(rows):
+            yy = y0 + k * 22
+            d.ellipse((x0, yy - 6, x0 + 12, yy + 6), fill=(*STATUS_COL[st], int(255 * la)))
+            d.text((x0 + 20, yy), f"{n:>3}", font=f_smallb, fill=(*INK, int(255 * la)), anchor="lm")
+            d.text((x0 + 56, yy), lab, font=f_small, fill=(*INK2, int(255 * la)), anchor="lm")
+
+    def check_cards(self, d, t):
+        """Two real pairs checked in full: keyword families on a log scale, and the evidence against decoys."""
+        v0 = self.t0("ver")
+        f = ease((t - v0 - 0.2) / 0.5) * (1 - ease((t - v0 - self.SWEEP_START + 0.6) / 0.5))
+        if f <= 0:
+            return
+        a = int(255 * f)
+        ev = self.d["summary"]["evidence"]
+        for k, p in enumerate((self.d["pairs"][self.d["pass_pair"]], self.d["pairs"][self.d["fail_pair"]])):
+            x0, y0, w, h = 46 + k * 600, 96, 588, 484
+            ok = p["sufficient"]
+            col = PASS if ok else FAIL
+            d.rounded_rectangle(
+                (x0, y0, x0 + w, y0 + h), 14, fill=(22, 26, 48, int(248 * f)), outline=(*col, a), width=2
+            )
+            d.text(
+                (x0 + 20, y0 + 14),
+                f"Matched pair {'A' if k == 0 else 'B'} (hop {p['tier']})",
+                font=f_head,
+                fill=(*INK, a),
+            )
+            d.text((x0 + w - 20, y0 + 16), "names still hidden", font=f_tiny, fill=(*MUTED, a), anchor="ra")
+            d.text((x0 + 20, y0 + 40), "■ original (C)", font=f_tiny, fill=(*A_COL, a))
+            d.text((x0 + 120, y0 + 40), "■ port (Go)", font=f_tiny, fill=(*B_COL, a))
+            ka, kb = self.d["nodes_a"][p["a"]]["kw"], self.d["nodes_b"][p["b"]]["kw"]
+            fam = sorted((j for j in range(len(ka)) if ka[j] > 0 or kb[j] > 0), key=lambda j: -max(ka[j], kb[j]))[:8]
+            bx, bl = x0 + 170, w - 220
+            grow = ease((t - v0 - 0.6) / 0.6)
+            for r, j in enumerate(fam):
+                yy = y0 + 66 + r * 34
+                d.text((bx - 10, yy + 7), self.d["signals"][j], font=f_small, fill=(*INK, a), anchor="rm")
+                la, lb = bl * logshare(ka[j]) * grow, bl * logshare(kb[j]) * grow
+                d.rectangle((bx, yy, bx + max(1, la), yy + 6), fill=(*A_COL, a))
+                d.rectangle((bx, yy + 8, bx + max(1, lb), yy + 14), fill=(*B_COL, a))
+                d.text((bx + la + 6, yy + 3), f"{ka[j]:.0%}", font=f_tiny, fill=(*A_COL, a), anchor="lm")
+                d.text((bx + lb + 6, yy + 12), f"{kb[j]:.0%}", font=f_tiny, fill=(*B_COL, a), anchor="lm")
+            ya = y0 + 66 + len(fam) * 34 + 4
+            for share in (0.01, 0.1, 1.0):
+                xx = bx + bl * logshare(share)
+                d.line((xx, ya - 4, xx, ya + 2), fill=(*MUTED, a))
+                d.text((xx, ya + 4), f"{share:.0%}", font=f_tiny, fill=(*MUTED, a), anchor="ma")
+            d.text((bx, ya + 20), "share of the function's keyword hits · log scale", font=f_tiny, fill=(*MUTED, a))
+            # evidence meter: lower is stronger; the threshold comes from decoys
+            my, mx0, mw, top = y0 + h - 70, x0 + 20, w - 40, 2.0
+            ef = ease((t - v0 - 2.2) / 0.8)
+            ea = int(255 * f * ef)
+            d.text(
+                (mx0, my - 26),
+                f"keyword-mix cosine {p['kw_cos']:.2f} · evidence distance {p['evidence']:.2f}",
+                font=f_small,
+                fill=(*INK2, ea),
+            )
+            d.rounded_rectangle((mx0, my, mx0 + mw, my + 10), 5, fill=(*PANEL2, ea))
+            tx = mx0 + mw * min(ev["threshold"], top) / top
+            d.rounded_rectangle((mx0, my, tx, my + 10), 5, fill=(*PASS, int(90 * f * ef)))
+            d.line((tx, my - 6, tx, my + 16), fill=(*INK, ea), width=2)
+            d.text((tx, my + 18), "decoy threshold", font=f_tiny, fill=(*INK2, ea), anchor="ma")
+            px = mx0 + mw * min(p["evidence"], top) / top
+            d.ellipse((px - 8, my - 3, px + 8, my + 13), fill=(*col, ea))
+            vf = ease((t - v0 - 3.4) / 0.6)
+            verdict = "SUFFICIENT EVIDENCE" if ok else "INSUFFICIENT EVIDENCE"
+            d.text((x0 + w - 20, y0 + 14 + 26), verdict, font=f_smallb, fill=(*col, int(255 * f * vf)), anchor="ra")
+
+    def verdict_card(self, d, t):
+        s0 = self.t0("ver") + T_VER - 5.6
+        f = ease((t - s0) / 0.5) * (1 - ease((t - self.t0("key")) / 0.4))
+        if f <= 0:
+            return
+        a = int(255 * f)
+        g, r = self.d["summary"], self.c["summary"]
+        x0, y0, w, h = 140, 150, 1000, 330
+        d.rounded_rectangle((x0, y0, x0 + w, y0 + h), 14, fill=(22, 26, 48, int(248 * f)), outline=(*PASS, a), width=2)
+        d.text((x0 + 24, y0 + 18), "Every matched pair, checked the same way", font=f_head, fill=(*INK, a))
+        tiles = [
+            (
+                f"{g['b']} (Go port)",
+                f"{g['evidence']['sufficient']}",
+                f"of {g['matched']} pairs: sufficient evidence",
+                PASS,
+            ),
+            (
+                f"{r['b']} (Rust rewrite)",
+                f"{r['evidence']['sufficient']}",
+                f"of {r['matched']} pairs: sufficient evidence",
+                FAIL,
+            ),
+            ("random pairing", "0", f"of {g['functions_a']} pairs the same function", FAIL),
+        ]
+        for k, (lab, big, sub, col) in enumerate(tiles):
+            tx = x0 + 24 + k * 325
+            tf = ease((t - s0 - 0.4 - 0.5 * k) / 0.5)
+            ta = int(255 * f * tf)
+            d.rounded_rectangle((tx, y0 + 56, tx + 300, y0 + 196), 10, fill=(*PANEL2, int(240 * f * tf)))
+            d.text((tx + 16, y0 + 70), lab, font=f_smallb, fill=(*INK2, ta))
+            d.text((tx + 16, y0 + 96), big, font=f_huge, fill=(*col, ta))
+            d.text((tx + 16, y0 + 164), sub, font=f_small, fill=(*INK2, ta))
+        ev = g["evidence"]
+        lines = [
+            (
+                "The threshold is set by decoys: functions of the same kind with their measurements shuffled. At it, "
+                f"about {ev['decoy_passing_per_draw']:.1f} decoy"
+            ),
+            (
+                f"pairs would pass per {g['matched']}, a false-pass rate under {ev['fdr']:.0%}. Unrelated code makes "
+                "pairs too; none of them pass."
+            ),
+        ]
+        la = int(255 * f * ease((t - s0 - 2.0) / 0.6))
+        for k, line in enumerate(lines):
+            d.text((x0 + 24, y0 + 222 + 24 * k), line, font=f_small, fill=(*INK2, la))
 
     def counter(self, d, t):
         tier, prog = self.matched_at(t)
-        if tier < 0 or t >= self.t0("fp"):
+        if tier < 0 or t >= self.t0("ver"):
             return
         n = self.cum[tier] if prog >= 1 else int(lerp(self.cum[tier - 1] if tier else 0, self.cum[tier], prog))
         tot = self.d["source"]["a"]["functions"]
@@ -627,7 +766,9 @@ class Film:
         d.rounded_rectangle((x0, y - 16, x0 + max(14, (x1 - x0) * n / tot), y - 2), 7, fill=col)
 
     def caption(self, d, t):
-        s, g, ab = self.d["summary"], self.d["summary"]["tiers"], self.d["ablation"]
+        s, ab = self.d["summary"], self.d["ablation"]
+        ev, r = s["evidence"], self.c["summary"]
+        v0, k0 = self.t0("ver"), self.t0("key")
         lines = []
         if t < self.t0("match"):
             lines = [
@@ -646,7 +787,7 @@ class Film:
             ]
         elif t < self.t0("hop1"):
             lines = [("Extend, first: ", "measure how the two languages differ,"), ("", "from the anchors only.")]
-        elif t < self.t0("fp"):
+        elif t < v0:
             k = 1 if t < self.t0("hop2") else 2 if t < self.t0("hop3") else 3
             lines = [
                 (f"Extend, hop {k}: ", "a caller or callee of a matched function pairs"),
@@ -655,20 +796,57 @@ class Film:
             ]
             if k == 3 and t > self.t0("hop3") + 3:
                 lines = [
-                    ("Extend stops ", "after 3 hops. Grey: functions whose"),
+                    ("Extend stops ", "after 3 hops. Dark: functions whose"),
                     ("", "neighbours offered no partner."),
                 ]
-        elif t < self.t0("key"):
+        elif t < v0 + self.SWEEP_START:
             lines = [
-                ("Fingerprint: ", "matching says which functions correspond; the keyword mix of each"),
-                ("", "matched pair says how alike they still are, and whether the match is a port at all."),
+                ("Fingerprint check: ", "extend always finds partners, even in unrelated code. So each pair's"),
+                ("", "keyword fingerprint is compared, and its evidence must beat decoys to count."),
+            ]
+        elif t < v0 + T_VER - 5.6:
+            lines = [
+                ("Every pair is checked: ", "teal = sufficient evidence, slate = insufficient."),
+                ("", "Insufficient is not wrong: it is a match the evidence cannot back."),
+            ]
+        elif t < k0:
+            lines = [
+                ("Evidence quality ", "is what sfs adds: each match carries a verdict, and the"),
+                ("", "verdict is calibrated, so unrelated code and random pairs score zero."),
+            ]
+        elif t < k0 + 4.0:
+            ok = [p for p in self.d["pairs"] if p["sufficient"]]
+            n_ok_right = sum(p["grade"] == "right" for p in ok)
+            bad = [p for p in self.d["pairs"] if p["grade"] != "right"]
+            held = sum(not p["sufficient"] for p in bad)
+            lines = [
+                ("Answer key: ", "names, never used, now shown. Drawn pairs with sufficient evidence:"),
+                (
+                    "",
+                    (
+                        f"{n_ok_right} of {len(ok)} are the same function. Drawn pairs that are not: "
+                        f"{held} of {len(bad)} held back."
+                    ),
+                ),
             ]
         else:
-            right = sum(x["right"] for x in g)
+            nc = ev["right"]
             lines = [
-                ("Answer key: ", f"names, never used, grade it: {right} of {s['matched']} pairs"),
-                ("", "are the same function. Red: wrong. Grey: no same-named function."),
-                ("", f"Shape alone, without the call graph: {ab['shape_only_right']} of {ab['shape_only_pairs']}."),
+                ("All ", f"{s['functions_a']} functions. {ev['sufficient']} pairs had sufficient evidence: {nc} are"),
+                (
+                    "",
+                    (
+                        f"the same function by name; {ev['wrong'] + ev['unkeyed']} are not confirmed (amber). "
+                        f"Rewrite: {r['evidence']['sufficient']}."
+                    ),
+                ),
+                (
+                    "",
+                    (
+                        f"Without the check: {s['right']} of {s['matched']} matches right. "
+                        f"Shape alone: {ab['shape_only_right']} of {ab['shape_only_pairs']}."
+                    ),
+                ),
             ]
         y = 600
         for b, rest in lines:
@@ -678,27 +856,11 @@ class Film:
                 x += d.textlength(b, font=f_capb)
             d.text((x, y), rest, font=f_cap, fill=INK)
             y += 25
-        if t >= self.t0("key"):
-            self.key_bars(d, t)
 
-    def key_bars(self, d, t):
-        f = ease((t - self.t0("key") - 2.0) / 1.2)
-        if f <= 0:
-            return
-        a = int(255 * f)
-        names = ["anchors", "hop 1", "hop 2", "hop 3"]
-        d.text((900, 598), "right, by step", font=f_smallb, fill=(*INK, a))
-        for k, tr in enumerate(self.d["summary"]["tiers"]):
-            yy = 628 + k * 19
-            d.text((900, yy), names[k], font=f_small, fill=(*HOP[k], a), anchor="lm")
-            bx, bw = 975, 180
-            n = tr["n"]
-            r_w = bw * tr["right"] / n
-            w_w = bw * tr["wrong"] / n
-            d.rectangle((bx, yy - 7, bx + r_w, yy + 7), fill=(*RIGHT, a))
-            d.rectangle((bx + r_w, yy - 7, bx + r_w + w_w, yy + 7), fill=(*WRONG, a))
-            d.rectangle((bx + r_w + w_w, yy - 7, bx + bw, yy + 7), fill=(*UNKEYED, a))
-            d.text((bx + bw + 6, yy), f"{tr['right']}/{n}", font=f_tiny, fill=(*INK2, a), anchor="lm")
+
+def logshare(v):
+    """0..1 position of a share (0..1) on a log scale from 0.1% to 100%."""
+    return math.log10(1 + 1000 * max(0.0, v)) / math.log10(1001)
 
 
 def ffmpeg_exe():
@@ -714,7 +876,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", required=True, help="seed_extend_data.py output for the port")
     ap.add_argument("--contrast", required=True, help="seed_extend_data.py --summary-only output for a non-port")
-    ap.add_argument("--fp-pair", default="G_Ticker", help="original-side name of the pair shown in step 4")
+    ap.add_argument("--pass-pair", default="S_StartSound", help="original-side name of the sufficient pair in step 4")
+    ap.add_argument("--fail-pair", default="G_WriteDemoTiccmd", help="original-side name of the insufficient pair")
     ap.add_argument("--out", required=True, help="output stem: writes <out>.gif, <out>.mp4, <out>.png")
     ap.add_argument("--still", type=float, help="write one frame at this second to <out>-still.png and stop")
     a = ap.parse_args(argv)
@@ -723,7 +886,10 @@ def main(argv=None) -> int:
     if c["summary"]["a"] != d["source"]["a"]["name"]:
         raise SystemExit("refusing: the contrast pair has a different original")
     names = [n["name"] for n in d["nodes_a"]]
-    d["fp_pair"] = next(k for k, p in enumerate(d["pairs"]) if names[p["a"]] == a.fp_pair)
+    d["pass_pair"] = next(k for k, p in enumerate(d["pairs"]) if names[p["a"]] == a.pass_pair)
+    d["fail_pair"] = next(k for k, p in enumerate(d["pairs"]) if names[p["a"]] == a.fail_pair)
+    if not d["pairs"][d["pass_pair"]]["sufficient"] or d["pairs"][d["fail_pair"]]["sufficient"]:
+        raise SystemExit("refusing: --pass-pair must be a sufficient pair and --fail-pair an insufficient one")
     fm = Film(d, c)
     out = pathlib.Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -736,7 +902,9 @@ def main(argv=None) -> int:
         fm.frame(i / FPS).save(fdir / f"f{i:04d}.png")
     ff = [ffmpeg_exe(), "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", str(fdir / "f%04d.png")]
     subprocess.run(ff + ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", str(out) + ".mp4"], check=True)
-    gif_filter = "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer"
+    gif_filter = (
+        "fps=10,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96[p];[b][p]paletteuse=dither=bayer"
+    )
     subprocess.run([*ff, "-vf", gif_filter, str(out) + ".gif"], check=True)
     shutil.copy(fdir / f"f{n - 1:04d}.png", str(out) + ".png")
     shutil.rmtree(fdir, ignore_errors=True)
