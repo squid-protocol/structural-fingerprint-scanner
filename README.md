@@ -7,6 +7,26 @@
 1. **Layer 1 — Macro-Topology (FGW + Seed-and-Extend):** Fused Gromov–Wasserstein (`FGW`) optimal transport over function geometry + hop-distance call graphs, followed by 3-hop call-graph extension. Recovers vertical source ports, cross-language translations, and horizontally borrowed modules.
 2. **Layer 2 — Micro-Idiomatic Texture (32-Keyword-Family Lattice + `delta_lang`):** Distributional and per-matched-pair comparison across 32 structural signal families (branching, bitwise ops, pointer/state flux, encapsulation, I/O, etc.), with additive language-translation centering (`LanguageDeltaModel`) and linear style attribution (`StyleAxis`).
 
+### How it works, shown: match, extend, fingerprint
+
+![How sfs finds a port: linuxdoom (C) against its Go port gore](docs/media/seed-extend.gif)
+
+Real scans, real output: linuxdoom (C, 777 functions) against gore, its Go port (996 functions). Names are hidden until
+the last step.
+
+1. **Read:** each function becomes a shape (size, arguments, 32 keyword families) at a place in its call graph.
+2. **Match:** FGW optimal transport pairs functions whose shape *and* call-graph position agree. 439 pairs pick each
+   other; only the strongest 15% are kept as anchors (66).
+3. **Extend:** the C → Go offset is measured on the anchors. Then, for 3 hops, a caller or callee of a matched function
+   is paired with its partner's unclaimed neighbour that is closest in shape. 66 → 276 → 482 → 598 matched (77%).
+4. **Fingerprint:** each matched pair's keyword mix is compared. Pair by pair it separates the port from a Rust rewrite
+   (cosine 0.74 vs 0.56); the codebase-wide mix cannot (JSD 0.39 vs 0.40).
+5. **Answer key:** names, never used to match, grade it. 364 of 598 pairs are the same function: 62 of 66 anchors, then
+   fewer with each hop. Shape alone, without the call graph, gets 220 of 329.
+
+Details, caveats and how to regenerate: [`docs/media/README.md`](docs/media/README.md) ·
+[MP4](docs/media/seed-extend.mp4)
+
 It also provides **cohort fingerprinting**, **target–decoy structural twins**, **descent & profile trees**, **subsystem subway maps**, **git-history drift timelines**, and **scan-quality verification** (`ctags` / `tree-sitter` + LLM triage + PII-stripped GitGalaxy Epic issue reporting).
 
 > **Featured Case Study — [DOOM's DNA: What Survives Translation, Porting, and Rewriting](https://squid-protocol.github.io/gitgalaxy/museum-of-code/teardown-of-doom/):**
